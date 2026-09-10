@@ -7,12 +7,12 @@
  Copyright (c) 2025 maxvdec
 */
 
-#include "opal/opal.h"
 #include "diagnostics.h"
+#include "opal/opal.h"
 #include <cctype>
-#include <cstdlib>
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <glad/glad.h>
 #include <memory>
@@ -22,9 +22,9 @@
 #include "metal_state.h"
 #endif
 #ifdef VULKAN
-#include <vulkan/vulkan.hpp>
 #include <spirv_cross/spirv_cross.hpp>
 #include <spirv_cross/spirv_glsl.hpp>
+#include <vulkan/vulkan.hpp>
 #endif
 
 namespace opal {
@@ -186,10 +186,26 @@ std::shared_ptr<Shader> Shader::createFromSource(const char *source,
     auto shader = std::make_shared<Shader>();
     shader->type = type;
     shader->source = strdup(source);
-    return shader;
+    return shader->forFunction("main0", type);
 #else
     throw std::runtime_error("Shader creation not implemented for this API");
 #endif
+}
+
+std::shared_ptr<Shader> Shader::forFunction(const std::string &functionName,
+                                            ShaderType type) {
+    if (functionName.empty()) {
+        throw std::runtime_error("Function name cannot be empty");
+    }
+
+    if (shaderID != 0) {
+        throw std::runtime_error(
+            "Shader has already been compiled; cannot set function name");
+    }
+
+    this->functionName = functionName;
+    this->type = type;
+    return shared_from_this();
 }
 
 void Shader::compile() {
@@ -228,7 +244,12 @@ void Shader::compile() {
         throw std::runtime_error(message);
     }
 
-    NS::String *entryName = NS::String::string("main0", NS::UTF8StringEncoding);
+    if (functionName.empty()) {
+        throw std::runtime_error(
+            "Metal shader function name must be specified before compilation");
+    }
+    NS::String *entryName =
+        NS::String::string(functionName.c_str(), NS::UTF8StringEncoding);
     shaderState.function = shaderState.library->newFunction(entryName);
     if (shaderState.function == nullptr) {
         NS::Array *functions = shaderState.library->functionNames();
@@ -239,7 +260,8 @@ void Shader::compile() {
     }
 
     if (shaderState.function == nullptr) {
-        throw std::runtime_error("Unable to load Metal entry function");
+        throw std::runtime_error("Unable to load function " + functionName +
+                                 " from Metal shader library");
     }
 
     this->shaderID = Shader::currentId++;
