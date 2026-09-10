@@ -500,7 +500,7 @@ struct UniformBindingInfo {
 };
 #endif
 
-class Shader : public std::enable_shared_from_this<Shader> {
+class Shader {
   public:
     static std::shared_ptr<Shader> createFromSource(const char *source,
                                                     ShaderType type);
@@ -512,7 +512,7 @@ class Shader : public std::enable_shared_from_this<Shader> {
     void getShaderLog(char *logBuffer, size_t bufferSize) const;
 
     std::shared_ptr<Shader> forFunction(const std::string &functionName,
-                                        ShaderType type);
+                                        ShaderType type) const;
 
     uint shaderID;
     ShaderType type;

@@ -193,19 +193,14 @@ std::shared_ptr<Shader> Shader::createFromSource(const char *source,
 }
 
 std::shared_ptr<Shader> Shader::forFunction(const std::string &functionName,
-                                            ShaderType type) {
-    if (functionName.empty()) {
-        throw std::runtime_error("Function name cannot be empty");
+                                            ShaderType type) const {
+    if (source == nullptr) {
+        throw std::runtime_error("Shader source is null");
     }
 
-    if (shaderID != 0) {
-        throw std::runtime_error(
-            "Shader has already been compiled; cannot set function name");
-    }
-
-    this->functionName = functionName;
-    this->type = type;
-    return shared_from_this();
+    auto shader = Shader::createFromSource(source, type);
+    shader->functionName = functionName;
+    return shader;
 }
 
 void Shader::compile() {
