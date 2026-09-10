@@ -6,6 +6,8 @@
 
 namespace opal::detail {
 void log(LogLevel level, const std::string &message);
+void emit(const ResourceEvent &event);
+void emit(const DrawEvent &event);
 }
 
 #endif

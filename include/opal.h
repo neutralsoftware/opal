@@ -43,6 +43,30 @@ enum class LogLevel { Info, Warning, Error };
 using LogCallback = void (*)(LogLevel level, const char *message);
 void setLogCallback(LogCallback callback);
 
+enum class ResourceType { Texture, Buffer, Shader, Mesh };
+enum class ResourceOperation { Created, Loaded, Unloaded };
+
+struct ResourceEvent {
+    std::string callerObject;
+    ResourceType type;
+    ResourceOperation operation;
+    unsigned int frameNumber;
+    float sizeMb;
+};
+
+enum class DrawType { Draw, Indexed, Patch };
+
+struct DrawEvent {
+    std::string callerObject;
+    DrawType type;
+    unsigned int frameNumber;
+};
+
+using ResourceCallback = void (*)(const ResourceEvent &event);
+using DrawCallback = void (*)(const DrawEvent &event);
+void setResourceCallback(ResourceCallback callback);
+void setDrawCallback(DrawCallback callback);
+
 /**
  * @file opal/opal.h
  * @brief Opal rendering abstraction layer (OpenGL/Vulkan/Metal).

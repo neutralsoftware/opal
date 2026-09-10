@@ -1813,6 +1813,8 @@ auto CommandBuffer::draw(uint vertexCount, uint instanceCount, uint firstVertex,
     state.hasDraw = true;
 #endif
 
+    detail::emit(DrawEvent{std::to_string(objectId), DrawType::Draw,
+                           static_cast<unsigned int>(device->frameCount)});
     drawCallCount++;
 }
 
@@ -1935,6 +1937,8 @@ void CommandBuffer::drawIndexed(uint indexCount, uint instanceCount,
     state.hasDraw = true;
 #endif
 
+    detail::emit(DrawEvent{std::to_string(objectId), DrawType::Indexed,
+                           static_cast<unsigned int>(device->frameCount)});
     drawCallCount++;
 }
 
@@ -2087,6 +2091,8 @@ void CommandBuffer::drawPatches(uint vertexCount, uint firstVertex,
     state.hasDraw = true;
 #endif
 
+    detail::emit(DrawEvent{std::to_string(objectId), DrawType::Patch,
+                           static_cast<unsigned int>(device->frameCount)});
     drawCallCount++;
 }
 

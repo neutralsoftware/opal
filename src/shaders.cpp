@@ -314,8 +314,25 @@ void ShaderProgram::attachShader(const std::shared_ptr<Shader> &shader,
         uniformBindings[pair.first] = pair.second;
     }
 
+    detail::emit(ResourceEvent{
+        std::to_string(callerId), ResourceType::Shader,
+        ResourceOperation::Loaded,
+        Device::globalInstance
+            ? static_cast<unsigned int>(Device::globalInstance->frameCount)
+            : 0,
+        static_cast<float>(shader->spirvBytecode.size()) /
+            (1024.0f * 1024.0f)});
+
 #elif defined(METAL)
     attachedShaders.push_back(shader);
+    detail::emit(ResourceEvent{
+        std::to_string(callerId), ResourceType::Shader,
+        ResourceOperation::Loaded,
+        Device::globalInstance
+            ? static_cast<unsigned int>(Device::globalInstance->frameCount)
+            : 0,
+        static_cast<float>(shader->source ? strlen(shader->source) : 0) /
+            (1024.0f * 1024.0f)});
 #else
     throw std::runtime_error("Shader attachment not implemented for this API");
 #endif

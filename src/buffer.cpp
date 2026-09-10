@@ -9,6 +9,7 @@
 
 #include <memory>
 #include <opal/opal.h>
+#include "diagnostics.h"
 #include <glad/glad.h>
 #include <cstring>
 #include <stdexcept>
@@ -195,6 +196,13 @@ std::shared_ptr<Buffer> Buffer::create(BufferUsage usage, size_t size,
     }
 #endif
 
+    detail::emit(ResourceEvent{std::to_string(callerId), ResourceType::Buffer,
+                               ResourceOperation::Created,
+                               Device::globalInstance
+                                   ? static_cast<unsigned int>(
+                                         Device::globalInstance->frameCount)
+                                   : 0,
+                               static_cast<float>(size) / (1024.0f * 1024.0f)});
     return buffer;
 }
 
@@ -358,6 +366,13 @@ void Buffer::bind(int callerId) const {
 #elif defined(METAL)
 #endif
 
+    detail::emit(ResourceEvent{std::to_string(callerId), ResourceType::Buffer,
+                               ResourceOperation::Loaded,
+                               Device::globalInstance
+                                   ? static_cast<unsigned int>(
+                                         Device::globalInstance->frameCount)
+                                   : 0,
+                               0.0f});
 }
 
 void Buffer::unbind(int callerId) const {
@@ -390,6 +405,13 @@ void Buffer::unbind(int callerId) const {
     glBindBuffer(glTarget, 0);
 #elif defined(METAL)
 #endif
+    detail::emit(ResourceEvent{std::to_string(callerId), ResourceType::Buffer,
+                               ResourceOperation::Unloaded,
+                               Device::globalInstance
+                                   ? static_cast<unsigned int>(
+                                         Device::globalInstance->frameCount)
+                                   : 0,
+                               0.0f});
 }
 
 std::shared_ptr<DrawingState>

@@ -8,6 +8,7 @@
 //
 
 #include "opal/opal.h"
+#include "diagnostics.h"
 #include <glad/glad.h>
 #include <algorithm>
 #include <cmath>
@@ -325,6 +326,15 @@ std::shared_ptr<Texture> Texture::create(TextureType type, TextureFormat format,
                                          int width, int height,
                                          TextureDataFormat dataFormat,
                                          const void *data, uint mipLevels) {
+    const auto emitCreated = [&](const std::shared_ptr<Texture> &texture) {
+        detail::emit(ResourceEvent{
+            "-1", ResourceType::Texture, ResourceOperation::Created,
+            Device::globalInstance
+                ? static_cast<unsigned int>(Device::globalInstance->frameCount)
+                : 0,
+            calculateTextureSizeMb(format, width, height)});
+        return texture;
+    };
 #ifdef OPENGL
     auto texture = std::make_shared<Texture>();
     texture->type = type;
@@ -377,10 +387,10 @@ std::shared_ptr<Texture> Texture::create(TextureType type, TextureFormat format,
         glPixelStorei(GL_UNPACK_ALIGNMENT, previousAlignment);
     }
 
-    return texture;
+    return emitCreated(texture);
 #elif defined(VULKAN)
-    return Texture::createVulkan(type, format, width, height, dataFormat, data,
-                                 mipLevels);
+    return emitCreated(Texture::createVulkan(type, format, width, height,
+                                             dataFormat, data, mipLevels));
 #elif defined(METAL)
     if (Device::globalInstance == nullptr) {
         throw std::runtime_error("Cannot create Metal texture without device");
@@ -453,11 +463,10 @@ std::shared_ptr<Texture> Texture::create(TextureType type, TextureFormat format,
         texture->updateData(data, width, height, dataFormat);
     }
 
-    return texture;
+    return emitCreated(texture);
 #else
     return nullptr;
 #endif
-
 }
 
 void Texture::updateFace(int faceIndex, const void *data, int width, int height,
@@ -608,6 +617,12 @@ void Texture::updateFace(int faceIndex, const void *data, int width, int height,
         upload.bytesPerRow, upload.bytesPerImage);
 #endif
 
+    detail::emit(ResourceEvent{
+        "-1", ResourceType::Texture, ResourceOperation::Created,
+        Device::globalInstance
+            ? static_cast<unsigned int>(Device::globalInstance->frameCount)
+            : 0,
+        calculateTextureSizeMb(format, width, height)});
 }
 
 void Texture::updateData3D(const void *data, int width, int height, int depth,
@@ -998,6 +1013,14 @@ void Pipeline::bindTexture(const std::string &name,
         return;
     }
 
+    detail::emit(ResourceEvent{
+        std::to_string(callerId), ResourceType::Texture,
+        ResourceOperation::Loaded,
+        Device::globalInstance
+            ? static_cast<unsigned int>(Device::globalInstance->frameCount)
+            : 0,
+        calculateTextureSizeMb(texture->format, texture->width,
+                               texture->height)});
 }
 
 #ifdef METAL
