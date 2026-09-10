@@ -184,9 +184,11 @@ std::shared_ptr<Shader> Shader::createFromSource(const char *source,
     return shader;
 #elif defined(METAL)
     auto shader = std::make_shared<Shader>();
+    shader->shaderID = 0;
     shader->type = type;
     shader->source = strdup(source);
-    return shader->forFunction("main0", type);
+    shader->functionName = "main0";
+    return shader;
 #else
     throw std::runtime_error("Shader creation not implemented for this API");
 #endif
