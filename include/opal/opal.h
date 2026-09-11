@@ -502,8 +502,9 @@ struct UniformBindingInfo {
 
 class Shader {
   public:
-    static std::shared_ptr<Shader> createFromSource(const char *source,
-                                                    ShaderType type);
+    static std::shared_ptr<Shader>
+    createFromSource(const char *source, ShaderType type,
+                     const std::string &entry = "main0");
     ~Shader();
 
     void compile();

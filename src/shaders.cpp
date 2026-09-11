@@ -17,6 +17,7 @@
 #include <glad/glad.h>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 #ifdef METAL
 #include "metal_state.h"
@@ -124,8 +125,9 @@ ShaderProgram::~ShaderProgram() {
 #endif
 }
 
-std::shared_ptr<Shader> Shader::createFromSource(const char *source,
-                                                 ShaderType type) {
+std::shared_ptr<Shader>
+Shader::createFromSource(const char *source, ShaderType type,
+                         const std::string &entryPoint) {
 #ifdef OPENGL
     GLenum shaderType = Shader::getGLShaderType(type);
 
@@ -187,7 +189,7 @@ std::shared_ptr<Shader> Shader::createFromSource(const char *source,
     shader->shaderID = 0;
     shader->type = type;
     shader->source = strdup(source);
-    shader->functionName = "main0";
+    shader->functionName = entryPoint;
     return shader;
 #else
     throw std::runtime_error("Shader creation not implemented for this API");
