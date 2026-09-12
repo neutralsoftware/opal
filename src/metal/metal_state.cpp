@@ -171,7 +171,10 @@ std::optional<FieldType> builtinType(const std::string &name) {
     if (name == "float" || name == "int" || name == "uint" || name == "bool") {
         return FieldType{4, 4, false, ""};
     }
-    if (name == "half") {
+    if (name == "char" || name == "uchar") {
+        return FieldType{1, 1, false, ""};
+    }
+    if (name == "short" || name == "ushort" || name == "half") {
         return FieldType{2, 2, false, ""};
     }
 
@@ -338,7 +341,7 @@ std::vector<BufferBinding> parseStageBufferBindings(const std::string &source,
     std::vector<BufferBinding> bindings;
     const std::regex stageStartRegex = stageStartRegexFor(stage);
     const std::regex bufferRegex(
-        R"((?:constant|device)\s+(?:const\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\*|&)\s*([A-Za-z_][A-Za-z0-9_]*)\s*\[\[buffer\((\d+)\)\]\])");
+        R"((?:const\s+)?(?:constant|device)\s+(?:const\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\*|&)\s*([A-Za-z_][A-Za-z0-9_]*)\s*\[\[buffer\((\d+)\)\]\])");
 
     auto stageBegin =
         std::sregex_iterator(source.begin(), source.end(), stageStartRegex);
@@ -476,6 +479,11 @@ const StructField *findField(const StructLayout &layout,
                              const std::string &name) {
     for (const StructField &field : layout.fields) {
         if (field.name == name) {
+            return &field;
+        }
+    }
+    for (const StructField &field : layout.fields) {
+        if (field.name == "_" + name) {
             return &field;
         }
     }
@@ -1121,6 +1129,7 @@ bool parseProgramLayouts(const std::string &vertexSource,
         }
     }
 
+    state.layouts.insert(cache.begin(), cache.end());
     return state.vertexFunction != nullptr && state.fragmentFunction != nullptr;
 }
 
@@ -1184,6 +1193,7 @@ bool parseComputeProgramLayouts(const std::string &computeSource,
         }
     }
 
+    state.layouts.insert(cache.begin(), cache.end());
     return state.computeFunction != nullptr;
 }
 
@@ -1237,6 +1247,25 @@ std::vector<UniformLocation> resolveUniformLocations(ProgramState &programState,
                 break;
             }
 
+            if (field->type.isStruct &&
+                field->type.structName.starts_with("_Array")) {
+                auto arrayLayout =
+                    programState.layouts.find(field->type.structName);
+                if (arrayLayout == programState.layouts.end()) {
+                    ok = false;
+                    break;
+                }
+                offset += field->offset;
+                field = findField(arrayLayout->second, "data");
+                if (field == nullptr) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (hasIndex && index >= field->arrayCount) {
+                ok = false;
+                break;
+            }
             size_t effectiveIndex = hasIndex ? index : 0;
             offset += field->offset + (effectiveIndex * field->stride);
 

@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <glad/glad.h>
 #include <memory>
 #include <string>
@@ -548,7 +549,10 @@ void Shader::performReflection() {
         size_t blockSize = compiler.get_declared_struct_size(type);
 
         std::string typeName = compiler.get_name(ubo.base_type_id);
-        std::string instanceName = ubo.name;
+        std::string instanceName = compiler.get_name(ubo.id);
+        if (instanceName.empty()) {
+            instanceName = ubo.name;
+        }
 
         // std::cout << "[VULKAN REFLECT] UBO found: instance='" << instanceName
         //           << "', type='" << typeName << "', set=" << set
@@ -568,6 +572,74 @@ void Shader::performReflection() {
         if (!typeName.empty() && typeName != instanceName) {
             registerBinding(typeName, blockInfo, true);
         }
+
+        std::function<void(const spirv_cross::SPIRType &, uint32_t,
+                           const std::string &)>
+            registerMembers;
+        registerMembers = [&](const spirv_cross::SPIRType &structure,
+                              uint32_t baseOffset, const std::string &prefix) {
+            for (uint32_t member = 0; member < structure.member_types.size();
+                 ++member) {
+                const auto &fieldType =
+                    compiler.get_type(structure.member_types[member]);
+                const std::string fieldName =
+                    compiler.get_member_name(structure.self, member);
+                const std::string path =
+                    prefix.empty() ? fieldName : prefix + "." + fieldName;
+                uint32_t offset =
+                    baseOffset +
+                    compiler.type_struct_member_offset(structure, member);
+                uint32_t size = static_cast<uint32_t>(
+                    compiler.get_declared_struct_member_size(structure,
+                                                             member));
+                UniformBindingInfo info = blockInfo;
+                info.offset = offset;
+                info.size = size;
+                registerBinding(path, info, false);
+                registerBinding(instanceName + "." + path, info, false);
+                if (fieldType.basetype == spirv_cross::SPIRType::Struct &&
+                    compiler.get_name(fieldType.self).starts_with("_Array")) {
+                    const auto &arrayType =
+                        compiler.get_type(fieldType.member_types.front());
+                    uint32_t stride =
+                        compiler.type_struct_member_array_stride(fieldType, 0);
+                    offset += compiler.type_struct_member_offset(fieldType, 0);
+                    for (uint32_t index = 0; index < arrayType.array.front();
+                         ++index) {
+                        info.offset = offset + index * stride;
+                        info.size = stride;
+                        std::string element =
+                            path + "[" + std::to_string(index) + "]";
+                        registerBinding(element, info, false);
+                        registerBinding(instanceName + "." + element, info,
+                                        false);
+                    }
+                } else if (!fieldType.array.empty()) {
+                    uint32_t stride = compiler.type_struct_member_array_stride(
+                        structure, member);
+                    for (uint32_t index = 0; index < fieldType.array.front();
+                         ++index) {
+                        info.offset = offset + index * stride;
+                        info.size = stride;
+                        std::string element =
+                            path + "[" + std::to_string(index) + "]";
+                        registerBinding(element, info, false);
+                        registerBinding(instanceName + "." + element, info,
+                                        false);
+                        if (fieldType.basetype ==
+                            spirv_cross::SPIRType::Struct) {
+                            registerMembers(fieldType, info.offset, element);
+                        }
+                    }
+                } else if (fieldType.basetype ==
+                               spirv_cross::SPIRType::Struct &&
+                           !compiler.get_name(fieldType.self)
+                                .starts_with("_MatrixStorage")) {
+                    registerMembers(fieldType, offset, path);
+                }
+            }
+        };
+        registerMembers(type, 0, "");
 
         for (uint32_t i = 0; i < type.member_types.size(); ++i) {
             std::string memberName =
@@ -672,6 +744,7 @@ void Shader::performReflection() {
         samplerInfo.isBuffer = false;
         samplerInfo.isStorageBuffer = false;
         samplerInfo.isCubemap = false;
+        samplerInfo.resourceType = VK_DESCRIPTOR_TYPE_SAMPLER;
         registerBinding(sampler.name, samplerInfo, false);
     }
 
@@ -690,7 +763,19 @@ void Shader::performReflection() {
         imageInfo.isBuffer = false;
         imageInfo.isStorageBuffer = false;
         imageInfo.isCubemap = false;
+        imageInfo.resourceType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
         registerBinding(image.name, imageInfo, false);
+    }
+
+    for (const auto &image : resources.storage_images) {
+        UniformBindingInfo info{};
+        info.set =
+            compiler.get_decoration(image.id, spv::DecorationDescriptorSet);
+        info.binding =
+            compiler.get_decoration(image.id, spv::DecorationBinding);
+        info.isSampler = true;
+        info.resourceType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        registerBinding(compiler.get_name(image.id), info, false);
     }
 
     for (const auto &ssbo : resources.storage_buffers) {
@@ -709,6 +794,7 @@ void Shader::performReflection() {
         ssboInfo.isStorageBuffer = true;
         ssboInfo.isCubemap = false;
         registerBinding(ssbo.name, ssboInfo, true);
+        registerBinding(compiler.get_name(ssbo.id), ssboInfo, true);
     }
 }
 

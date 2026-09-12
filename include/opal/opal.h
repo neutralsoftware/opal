@@ -497,6 +497,7 @@ struct UniformBindingInfo {
     bool isBuffer;
     bool isStorageBuffer;
     bool isCubemap;
+    VkDescriptorType resourceType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 };
 #endif
 

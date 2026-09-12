@@ -511,7 +511,7 @@ void Pipeline::buildPipelineLayout() {
                 } else if (info.isSampler) {
                     auto &binding =
                         descriptorBindingInfo[info.set][info.binding];
-                    binding.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    binding.type = info.resourceType;
                     binding.stageFlags |= stageFlag;
                     binding.count = 1;
                     binding.isBuffer = false;
