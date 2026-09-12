@@ -5,15 +5,20 @@ include(FetchContent)
 
 set(OPAL_BACKEND AUTO CACHE STRING "AUTO, METAL, VULKAN, or OPENGL")
 set_property(CACHE OPAL_BACKEND PROPERTY STRINGS AUTO METAL VULKAN OPENGL)
+
 string(TOUPPER "${OPAL_BACKEND}" OPAL_BACKEND)
+
+set(OPAL_RESOLVED_BACKEND "${OPAL_BACKEND}")
 
 if(OPAL_BACKEND STREQUAL "AUTO")
     if(APPLE)
-        set(OPAL_BACKEND METAL)
+        set(OPAL_RESOLVED_BACKEND METAL)
     else()
-        set(OPAL_BACKEND VULKAN)
+        set(OPAL_RESOLVED_BACKEND VULKAN)
     endif()
 endif()
+
+message(STATUS "Opal backend: ${OPAL_RESOLVED_BACKEND}")
 
 if(NOT TARGET glm::glm AND NOT TARGET glm::glm-header-only AND NOT TARGET glm-header-only)
     FetchContent_Declare(glm GIT_REPOSITORY https://github.com/g-truc/glm.git GIT_TAG 1.0.1 GIT_SHALLOW TRUE)
@@ -85,22 +90,39 @@ target_link_libraries(opal PUBLIC
     $<INSTALL_INTERFACE:SDL3::SDL3>
 )
 
-if(OPAL_BACKEND STREQUAL "METAL")
+if(OPAL_RESOLVED_BACKEND STREQUAL "METAL")
     if(NOT APPLE)
         message(FATAL_ERROR "The Metal backend is available only on Apple platforms")
     endif()
-    target_sources(opal PRIVATE src/metal/metal_state.cpp)
-    target_compile_definitions(opal PUBLIC METAL GLM_FORCE_DEPTH_ZERO_TO_ONE)
+
+    target_sources(opal PRIVATE
+        src/metal/metal_state.cpp
+    )
+
+    target_compile_definitions(opal PUBLIC
+        METAL
+        GLM_FORCE_DEPTH_ZERO_TO_ONE
+    )
+
     find_library(OPAL_METAL_FRAMEWORK Metal REQUIRED)
     find_library(OPAL_METALFX_FRAMEWORK MetalFX REQUIRED)
     find_library(OPAL_COCOA_FRAMEWORK Cocoa REQUIRED)
     find_library(OPAL_QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
-    target_link_libraries(opal PRIVATE ${OPAL_METAL_FRAMEWORK} ${OPAL_METALFX_FRAMEWORK} ${OPAL_COCOA_FRAMEWORK} ${OPAL_QUARTZCORE_FRAMEWORK})
-elseif(OPAL_BACKEND STREQUAL "VULKAN")
+
+    target_link_libraries(opal PRIVATE
+        ${OPAL_METAL_FRAMEWORK}
+        ${OPAL_METALFX_FRAMEWORK}
+        ${OPAL_COCOA_FRAMEWORK}
+        ${OPAL_QUARTZCORE_FRAMEWORK}
+    )
+
+elseif(OPAL_RESOLVED_BACKEND STREQUAL "VULKAN")
+
     find_package(Vulkan REQUIRED)
     find_package(spirv_cross_core REQUIRED)
     find_package(spirv_cross_glsl REQUIRED)
     find_package(spirv_cross_reflect REQUIRED)
+
     target_sources(opal PRIVATE
         src/vulkan/buffer.cpp
         src/vulkan/framebuffer.cpp
@@ -111,14 +133,35 @@ elseif(OPAL_BACKEND STREQUAL "VULKAN")
         src/vulkan/texture.cpp
         src/vulkan/vulkanDevice.cpp
     )
-    target_compile_definitions(opal PUBLIC VULKAN GLM_FORCE_DEPTH_ZERO_TO_ONE)
-    target_link_libraries(opal PRIVATE Vulkan::Vulkan spirv-cross-core spirv-cross-glsl spirv-cross-reflect)
-elseif(OPAL_BACKEND STREQUAL "OPENGL")
+
+    target_compile_definitions(opal PUBLIC
+        VULKAN
+        GLM_FORCE_DEPTH_ZERO_TO_ONE
+    )
+
+    target_link_libraries(opal PRIVATE
+        Vulkan::Vulkan
+        spirv-cross-core
+        spirv-cross-glsl
+        spirv-cross-reflect
+    )
+
+elseif(OPAL_RESOLVED_BACKEND STREQUAL "OPENGL")
+
     find_package(OpenGL REQUIRED)
-    target_sources(opal PRIVATE third-party/glad/glad.c)
+
+    target_sources(opal PRIVATE
+        third-party/glad/glad.c
+    )
+
     target_compile_definitions(opal PUBLIC OPENGL)
-    target_include_directories(opal INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/third-party)
+
+    target_include_directories(opal INTERFACE
+        ${CMAKE_CURRENT_SOURCE_DIR}/third-party
+    )
+
     target_link_libraries(opal PRIVATE OpenGL::GL)
+
 else()
     message(FATAL_ERROR "Invalid OPAL_BACKEND=${OPAL_BACKEND}")
 endif()
