@@ -7,13 +7,13 @@
  Copyright (c) 2025 maxvdec
 */
 
-#include "opal/opal.h"
-#include <glad/glad.h>
 #include "diagnostics.h"
+#include "opal/opal.h"
 #include "windowing.h"
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <glad/glad.h>
 #include <memory>
 #include <stdexcept>
 #ifdef METAL
@@ -21,12 +21,18 @@
 #include <objc/message.h>
 #include <objc/runtime.h>
 #endif
+#ifdef VULKAN
+#include "vulkan_state.h"
+#include <SDL3/SDL_vulkan.h>
+#endif
 
 namespace opal {
 
 Context::~Context() {
 #ifdef METAL
     metal::releaseContextState(this);
+#elif VULKAN
+    vulkan::releaseContextState(this);
 #endif
     if (glContext != nullptr) {
         SDL_GL_DestroyContext(glContext);
@@ -182,8 +188,74 @@ std::shared_ptr<Context> Context::create(ContextConfiguration config) {
 #ifdef METAL
     config.useOpenGL = false;
     context->config.useOpenGL = false;
-#endif
+#elif VULKAN
+    config.useOpenGL = false;
+    context->config.useOpenGL = false;
 
+    auto &vulkanState = vulkan::contextState(context.get());
+    VkApplicationInfo appInfo{};
+    appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    appInfo.pApplicationName = config.applicationName.c_str();
+    appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
+    appInfo.pEngineName = "Atlas Engine";
+    appInfo.engineVersion = VK_MAKE_VERSION(0, 1, 0);
+
+    VkInstanceCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    createInfo.pApplicationInfo = &appInfo;
+
+    std::vector<const char *> extensions;
+
+    Uint32 sdlExtensionCount = 0;
+    const char *const *sdlExtensions =
+        SDL_Vulkan_GetInstanceExtensions(&sdlExtensionCount);
+
+    for (Uint32 i = 0; i < sdlExtensionCount; ++i) {
+        extensions.push_back(sdlExtensions[i]);
+    }
+
+    extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+
+    createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
+    createInfo.ppEnabledExtensionNames = extensions.data();
+
+    VkDebugUtilsMessengerCreateInfoEXT debugInfo{};
+
+    if (vulkan::checkValidationLayerSupport() &&
+        config.createValidationLayers) {
+        const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
+
+        createInfo.enabledLayerCount = 1;
+        createInfo.ppEnabledLayerNames = layers;
+
+        vulkan::configureDebugMessenger(debugInfo);
+        createInfo.pNext = &debugInfo;
+    } else {
+        detail::log(LogLevel::Warning,
+                    "Validation layer not available, proceeding without it");
+        createInfo.enabledLayerCount = 0;
+        createInfo.ppEnabledLayerNames = nullptr;
+    }
+
+    VULKAN_GUARD(vkCreateInstance(&createInfo, nullptr, &vulkanState.instance),
+                 "Failed to create Vulkan instance");
+
+    if (config.createValidationLayers) {
+        auto createDebugMessenger =
+            reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
+                vkGetInstanceProcAddr(vulkanState.instance,
+                                      "vkCreateDebugUtilsMessengerEXT"));
+
+        if (!createDebugMessenger) {
+            throw std::runtime_error(
+                "Failed to load vkCreateDebugUtilsMessengerEXT");
+        }
+
+        VULKAN_GUARD(createDebugMessenger(vulkanState.instance, &debugInfo,
+                                          nullptr, &vulkanState.debugMessenger),
+                     "Failed to create Vulkan debug messenger");
+    }
+#endif
 
     return context;
 }
@@ -229,6 +301,10 @@ SDL_Window *Context::makeWindow(int width, int height, const char *title,
 #ifdef METAL
     if (!config.useOpenGL) {
         windowFlags |= SDL_WINDOW_METAL;
+    }
+#elif VULKAN
+    if (!config.useOpenGL) {
+        windowFlags |= SDL_WINDOW_VULKAN;
     }
 #endif
     if (resizable) {
@@ -401,7 +477,5 @@ std::shared_ptr<Framebuffer> Device::getDefaultFramebuffer() {
 }
 
 Device *Device::globalInstance = nullptr;
-
-
 
 } // namespace opal
