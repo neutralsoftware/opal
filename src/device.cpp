@@ -21,9 +21,6 @@
 #include <objc/message.h>
 #include <objc/runtime.h>
 #endif
-#ifdef VULKAN
-#include <vulkan/vulkan.hpp>
-#endif
 
 namespace opal {
 
@@ -187,12 +184,6 @@ std::shared_ptr<Context> Context::create(ContextConfiguration config) {
     context->config.useOpenGL = false;
 #endif
 
-#ifdef VULKAN
-    context->createInstance();
-    if (config.createValidationLayers) {
-        context->setupMessenger();
-    }
-#endif
 
     return context;
 }
@@ -235,11 +226,6 @@ SDL_Window *Context::makeWindow(int width, int height, const char *title,
                                 : SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
         windowFlags |= SDL_WINDOW_OPENGL;
     }
-#ifdef VULKAN
-    if (!config.useOpenGL) {
-        windowFlags |= SDL_WINDOW_VULKAN;
-    }
-#endif
 #ifdef METAL
     if (!config.useOpenGL) {
         windowFlags |= SDL_WINDOW_METAL;
@@ -285,9 +271,6 @@ SDL_Window *Context::makeWindow(int width, int height, const char *title,
     }
 
     SDL_SetWindowAlwaysOnTop(this->window, alwaysOnTop);
-#ifdef VULKAN
-    this->setupSurface();
-#endif
     return this->window;
 }
 
@@ -305,15 +288,6 @@ DeviceInfo Device::getDeviceInfo() {
     info.driverVersion = "N/A";
     info.renderingVersion = reinterpret_cast<const char *>(
         glGetString(GL_SHADING_LANGUAGE_VERSION));
-    info.opalVersion = OPAL_VERSION;
-    return info;
-#elif defined(VULKAN)
-    VkPhysicalDeviceProperties deviceProperties;
-    vkGetPhysicalDeviceProperties(this->physicalDevice, &deviceProperties);
-    info.driverVersion = std::to_string(deviceProperties.driverVersion);
-    info.deviceName = deviceProperties.deviceName;
-    info.vendorName = std::to_string(deviceProperties.vendorID);
-    info.renderingVersion = std::to_string(deviceProperties.apiVersion);
     info.opalVersion = OPAL_VERSION;
     return info;
 #elif defined(METAL)
@@ -358,15 +332,6 @@ Device::acquire([[maybe_unused]] const std::shared_ptr<Context> &context) {
     device->context = context;
 
     Device::globalInstance = device.get();
-    return device;
-#elif defined(VULKAN)
-    auto device = std::make_shared<Device>();
-    Device::globalInstance = device.get();
-    device->context = context;
-    device->pickPhysicalDevice(context);
-    device->createLogicalDevice(context);
-    device->createSwapChain(context);
-    device->createImageViews();
     return device;
 #elif defined(METAL)
     auto device = std::make_shared<Device>();
@@ -437,25 +402,6 @@ std::shared_ptr<Framebuffer> Device::getDefaultFramebuffer() {
 
 Device *Device::globalInstance = nullptr;
 
-#ifdef VULKAN
-VkDevice Device::globalDevice = VK_NULL_HANDLE;
-#endif
 
-#ifdef VULKAN
-std::shared_ptr<Buffer> Device::getDefaultInstanceBuffer() {
-    if (defaultInstanceBuffer != nullptr) {
-        return defaultInstanceBuffer;
-    }
-
-    static const float identity[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,
-                                       0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
-                                       0.0f, 0.0f, 0.0f, 1.0f};
-
-    defaultInstanceBuffer =
-        Buffer::create(BufferUsage::VertexBuffer, sizeof(identity), identity,
-                       MemoryUsageType::GPUOnly);
-    return defaultInstanceBuffer;
-}
-#endif
 
 } // namespace opal

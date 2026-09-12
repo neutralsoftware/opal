@@ -23,11 +23,6 @@
 #ifdef METAL
 #include "metal_state.h"
 #endif
-#ifdef VULKAN
-#include <spirv_cross/spirv_cross.hpp>
-#include <spirv_cross/spirv_glsl.hpp>
-#include <vulkan/vulkan.hpp>
-#endif
 
 namespace opal {
 
@@ -105,7 +100,7 @@ uint Shader::getGLShaderType(ShaderType type) {
 }
 #endif
 
-#if defined(VULKAN) || defined(METAL)
+#if defined(METAL)
 int Shader::currentId = 1;
 int ShaderProgram::currentId = 1;
 #endif
@@ -141,50 +136,6 @@ Shader::createFromSource(const char *source, ShaderType type,
     shader->source = strdup(source);
     return shader;
 
-#elif defined(VULKAN)
-    auto shader = std::make_shared<Shader>();
-    shader->type = type;
-    shader->source = strdup(source);
-
-    std::vector<uint8_t> bytecode;
-    while (*source) {
-        uint8_t byte = 0;
-        for (int i = 0; i < 2; ++i) {
-            char c = *source++;
-            byte <<= 4;
-            if (c >= '0' && c <= '9') {
-                byte |= (c - '0');
-            } else if (c >= 'a' && c <= 'f') {
-                byte |= (c - 'a' + 10);
-            } else if (c >= 'A' && c <= 'F') {
-                byte |= (c - 'A' + 10);
-            } else {
-                throw std::runtime_error(
-                    "Invalid hex character in shader source");
-            }
-        }
-        bytecode.push_back(byte);
-    }
-    if (type == ShaderType::Geometry) {
-        throw std::runtime_error(
-            "Geometry shaders are not supported in Vulkan");
-    }
-
-    shader->spirvBytecode.resize(bytecode.size() / 4);
-    memcpy(shader->spirvBytecode.data(), bytecode.data(), bytecode.size());
-
-    VkShaderModuleCreateInfo createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    createInfo.codeSize = bytecode.size();
-    createInfo.pCode = reinterpret_cast<const uint32_t *>(bytecode.data());
-    if (vkCreateShaderModule(Device::globalDevice, &createInfo, nullptr,
-                             &shader->shaderModule) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create shader module");
-    }
-
-    shader->performReflection();
-
-    return shader;
 #elif defined(METAL)
     auto shader = std::make_shared<Shader>();
     shader->shaderID = 0;
@@ -211,8 +162,6 @@ std::shared_ptr<Shader> Shader::forFunction(const std::string &functionName,
 void Shader::compile() {
 #ifdef OPENGL
     glCompileShader(shaderID);
-#elif defined(VULKAN)
-    this->shaderID = Shader::currentId++;
 #elif defined(METAL)
     if (Device::globalInstance == nullptr) {
         throw std::runtime_error("Cannot compile Metal shader without device");
@@ -273,8 +222,6 @@ bool Shader::getShaderStatus() const {
     GLint success;
     glGetShaderiv(shaderID, GL_COMPILE_STATUS, &success);
     return success == GL_TRUE;
-#elif defined(VULKAN)
-    return true;
 #elif defined(METAL)
     auto &shaderState = metal::shaderState(const_cast<Shader *>(this));
     return shaderState.function != nullptr;
@@ -288,9 +235,6 @@ void Shader::getShaderLog(char *logBuffer, size_t bufferSize) const {
 #ifdef OPENGL
     glGetShaderInfoLog(shaderID, static_cast<GLsizei>(bufferSize), nullptr,
                        logBuffer);
-#elif defined(VULKAN)
-    strncpy(logBuffer, "Vulkan shader modules do not have compile logs.",
-            bufferSize);
 #elif defined(METAL)
     strncpy(logBuffer, "Metal shader compile status available via exceptions.",
             bufferSize);
@@ -306,9 +250,6 @@ std::shared_ptr<ShaderProgram> ShaderProgram::create() {
     auto program = std::make_shared<ShaderProgram>();
     program->programID = programId;
     program->attachedShaders = {};
-    return program;
-#elif defined(VULKAN)
-    auto program = std::make_shared<ShaderProgram>();
     return program;
 #elif defined(METAL)
     auto program = std::make_shared<ShaderProgram>();
@@ -330,21 +271,6 @@ void ShaderProgram::attachShader(const std::shared_ptr<Shader> &shader,
     attachedShaders.push_back(shader);
 
     (void)callerId;
-#elif defined(VULKAN)
-    attachedShaders.push_back(shader);
-    for (const auto &pair : shader->uniformBindings) {
-        uniformBindings[pair.first] = pair.second;
-    }
-
-    detail::emit(ResourceEvent{
-        std::to_string(callerId), ResourceType::Shader,
-        ResourceOperation::Loaded,
-        Device::globalInstance
-            ? static_cast<unsigned int>(Device::globalInstance->frameCount)
-            : 0,
-        static_cast<float>(shader->spirvBytecode.size()) /
-            (1024.0f * 1024.0f)});
-
 #elif defined(METAL)
     attachedShaders.push_back(shader);
     detail::emit(ResourceEvent{
@@ -371,8 +297,6 @@ void ShaderProgram::link() {
 
 #ifdef OPENGL
     glLinkProgram(programID);
-#elif defined(VULKAN)
-    this->programID = ShaderProgram::currentId++;
 #elif defined(METAL)
     auto &state = metal::programState(this);
     state = {};
@@ -441,8 +365,6 @@ bool ShaderProgram::getProgramStatus() const {
     GLint success;
     glGetProgramiv(programID, GL_LINK_STATUS, &success);
     return success == GL_TRUE;
-#elif defined(VULKAN)
-    return true;
 #elif defined(METAL)
     auto &state = metal::programState(const_cast<ShaderProgram *>(this));
     if (this->computeProgram) {
@@ -459,9 +381,6 @@ void ShaderProgram::getProgramLog(char *logBuffer, size_t bufferSize) const {
 #ifdef OPENGL
     glGetProgramInfoLog(programID, static_cast<GLsizei>(bufferSize), nullptr,
                         logBuffer);
-#elif defined(VULKAN)
-    strncpy(logBuffer, "Vulkan shader programs do not have link logs.",
-            bufferSize);
 #elif defined(METAL)
     strncpy(logBuffer, "Metal program link status available via exceptions.",
             bufferSize);
@@ -471,341 +390,5 @@ void ShaderProgram::getProgramLog(char *logBuffer, size_t bufferSize) const {
 #endif
 }
 
-#ifdef VULKAN
-void Shader::performReflection() {
-    if (spirvBytecode.empty()) {
-        return;
-    }
-
-    spirv_cross::Compiler compiler(spirvBytecode);
-    spirv_cross::ShaderResources resources = compiler.get_shader_resources();
-
-    auto registerBinding = [&](const std::string &name,
-                               const UniformBindingInfo &info,
-                               bool addAliases) {
-        if (name.empty()) {
-            return;
-        }
-
-        uniformBindings[name] = info;
-
-        if (!addAliases) {
-            return;
-        }
-
-        auto addAlias = [&](const std::string &alias) {
-            if (alias.empty()) {
-                return;
-            }
-            if (uniformBindings.find(alias) == uniformBindings.end()) {
-                uniformBindings[alias] = info;
-            }
-        };
-
-        auto addAliasIfSuffixMatches = [&](const std::string &suffix) {
-            size_t suffixLen = suffix.size();
-            if (name.size() <= suffixLen) {
-                return;
-            }
-            bool matches = true;
-            for (size_t i = 0; i < suffixLen; ++i) {
-                char cName =
-                    static_cast<char>(std::toupper(static_cast<unsigned char>(
-                        name[name.size() - suffixLen + i])));
-                char cSuffix = static_cast<char>(
-                    std::toupper(static_cast<unsigned char>(suffix[i])));
-                if (cName != cSuffix) {
-                    matches = false;
-                    break;
-                }
-            }
-            if (!matches) {
-                return;
-            }
-
-            std::string trimmed = name.substr(0, name.size() - suffixLen);
-            while (!trimmed.empty() &&
-                   std::isspace(static_cast<unsigned char>(trimmed.back()))) {
-                trimmed.pop_back();
-            }
-            if (!trimmed.empty()) {
-                addAlias(trimmed);
-            }
-        };
-
-        const std::array<std::string, 3> suffixes = {"UBO", "SSBO", "BUFFER"};
-        for (const auto &suffix : suffixes) {
-            addAliasIfSuffixMatches(suffix);
-        }
-    };
-
-    for (const auto &ubo : resources.uniform_buffers) {
-        uint32_t set =
-            compiler.get_decoration(ubo.id, spv::DecorationDescriptorSet);
-        uint32_t binding =
-            compiler.get_decoration(ubo.id, spv::DecorationBinding);
-
-        const spirv_cross::SPIRType &type = compiler.get_type(ubo.base_type_id);
-        size_t blockSize = compiler.get_declared_struct_size(type);
-
-        std::string typeName = compiler.get_name(ubo.base_type_id);
-        std::string instanceName = compiler.get_name(ubo.id);
-        if (instanceName.empty()) {
-            instanceName = ubo.name;
-        }
-
-        // std::cout << "[VULKAN REFLECT] UBO found: instance='" << instanceName
-        //           << "', type='" << typeName << "', set=" << set
-        //           << ", binding=" << binding << ", size=" << blockSize
-        //           << std::endl;
-
-        UniformBindingInfo blockInfo;
-        blockInfo.set = set;
-        blockInfo.binding = binding;
-        blockInfo.size = static_cast<uint32_t>(blockSize);
-        blockInfo.offset = 0;
-        blockInfo.isSampler = false;
-        blockInfo.isBuffer = true;
-        blockInfo.isStorageBuffer = false;
-        blockInfo.isCubemap = false;
-        registerBinding(instanceName, blockInfo, true);
-        if (!typeName.empty() && typeName != instanceName) {
-            registerBinding(typeName, blockInfo, true);
-        }
-
-        std::function<void(const spirv_cross::SPIRType &, uint32_t,
-                           const std::string &)>
-            registerMembers;
-        registerMembers = [&](const spirv_cross::SPIRType &structure,
-                              uint32_t baseOffset, const std::string &prefix) {
-            for (uint32_t member = 0; member < structure.member_types.size();
-                 ++member) {
-                const auto &fieldType =
-                    compiler.get_type(structure.member_types[member]);
-                const std::string fieldName =
-                    compiler.get_member_name(structure.self, member);
-                const std::string path =
-                    prefix.empty() ? fieldName : prefix + "." + fieldName;
-                uint32_t offset =
-                    baseOffset +
-                    compiler.type_struct_member_offset(structure, member);
-                uint32_t size = static_cast<uint32_t>(
-                    compiler.get_declared_struct_member_size(structure,
-                                                             member));
-                UniformBindingInfo info = blockInfo;
-                info.offset = offset;
-                info.size = size;
-                registerBinding(path, info, false);
-                registerBinding(instanceName + "." + path, info, false);
-                if (fieldType.basetype == spirv_cross::SPIRType::Struct &&
-                    compiler.get_name(fieldType.self).starts_with("_Array")) {
-                    const auto &arrayType =
-                        compiler.get_type(fieldType.member_types.front());
-                    uint32_t stride =
-                        compiler.type_struct_member_array_stride(fieldType, 0);
-                    offset += compiler.type_struct_member_offset(fieldType, 0);
-                    for (uint32_t index = 0; index < arrayType.array.front();
-                         ++index) {
-                        info.offset = offset + index * stride;
-                        info.size = stride;
-                        std::string element =
-                            path + "[" + std::to_string(index) + "]";
-                        registerBinding(element, info, false);
-                        registerBinding(instanceName + "." + element, info,
-                                        false);
-                    }
-                } else if (!fieldType.array.empty()) {
-                    uint32_t stride = compiler.type_struct_member_array_stride(
-                        structure, member);
-                    for (uint32_t index = 0; index < fieldType.array.front();
-                         ++index) {
-                        info.offset = offset + index * stride;
-                        info.size = stride;
-                        std::string element =
-                            path + "[" + std::to_string(index) + "]";
-                        registerBinding(element, info, false);
-                        registerBinding(instanceName + "." + element, info,
-                                        false);
-                        if (fieldType.basetype ==
-                            spirv_cross::SPIRType::Struct) {
-                            registerMembers(fieldType, info.offset, element);
-                        }
-                    }
-                } else if (fieldType.basetype ==
-                               spirv_cross::SPIRType::Struct &&
-                           !compiler.get_name(fieldType.self)
-                                .starts_with("_MatrixStorage")) {
-                    registerMembers(fieldType, offset, path);
-                }
-            }
-        };
-        registerMembers(type, 0, "");
-
-        for (uint32_t i = 0; i < type.member_types.size(); ++i) {
-            std::string memberName =
-                compiler.get_member_name(ubo.base_type_id, i);
-            uint32_t memberOffset = compiler.type_struct_member_offset(type, i);
-            size_t memberSize =
-                compiler.get_declared_struct_member_size(type, i);
-
-            // std::cout << "[VULKAN REFLECT]   Member: '" << memberName
-            //           << "' offset=" << memberOffset << ", size=" <<
-            //           memberSize
-            //           << std::endl;
-
-            UniformBindingInfo memberInfo;
-            memberInfo.set = set;
-            memberInfo.binding = binding;
-            memberInfo.size = static_cast<uint32_t>(memberSize);
-            memberInfo.offset = memberOffset;
-            memberInfo.isSampler = false;
-            memberInfo.isBuffer = true;
-            memberInfo.isStorageBuffer = false;
-            memberInfo.isCubemap = false;
-
-            registerBinding(instanceName + "." + memberName, memberInfo, false);
-            if (!typeName.empty() && typeName != instanceName) {
-                registerBinding(typeName + "." + memberName, memberInfo, false);
-            }
-            if (uniformBindings.find(memberName) == uniformBindings.end()) {
-                registerBinding(memberName, memberInfo, false);
-            }
-        }
-    }
-
-    for (const auto &pc : resources.push_constant_buffers) {
-        const spirv_cross::SPIRType &type = compiler.get_type(pc.base_type_id);
-        std::string typeName = compiler.get_name(pc.base_type_id);
-
-        for (uint32_t i = 0; i < type.member_types.size(); ++i) {
-            std::string memberName =
-                compiler.get_member_name(pc.base_type_id, i);
-            uint32_t memberOffset = compiler.type_struct_member_offset(type, i);
-            size_t memberSize =
-                compiler.get_declared_struct_member_size(type, i);
-
-            UniformBindingInfo memberInfo;
-            memberInfo.set = 0;
-            memberInfo.binding = 0;
-            memberInfo.size = static_cast<uint32_t>(memberSize);
-            memberInfo.offset = memberOffset;
-            memberInfo.isSampler = false;
-            memberInfo.isBuffer = false;
-            memberInfo.isStorageBuffer = false;
-            memberInfo.isCubemap = false;
-
-            // Register with just member name
-            registerBinding(memberName, memberInfo, false);
-            // Register with instance name prefix
-            if (!pc.name.empty()) {
-                registerBinding(pc.name + "." + memberName, memberInfo, false);
-            }
-            // Register with type name prefix (e.g., "material.albedo")
-            if (!typeName.empty() && typeName != pc.name) {
-                registerBinding(typeName + "." + memberName, memberInfo, false);
-            }
-        }
-    }
-
-    for (const auto &sampler : resources.sampled_images) {
-        uint32_t set =
-            compiler.get_decoration(sampler.id, spv::DecorationDescriptorSet);
-        uint32_t binding =
-            compiler.get_decoration(sampler.id, spv::DecorationBinding);
-
-        const spirv_cross::SPIRType &samplerType =
-            compiler.get_type(sampler.type_id);
-        bool isCube = samplerType.image.dim == spv::DimCube;
-
-        UniformBindingInfo samplerInfo;
-        samplerInfo.set = set;
-        samplerInfo.binding = binding;
-        samplerInfo.size = 0;
-        samplerInfo.offset = 0;
-        samplerInfo.isSampler = true;
-        samplerInfo.isBuffer = false;
-        samplerInfo.isStorageBuffer = false;
-        samplerInfo.isCubemap = isCube;
-        registerBinding(sampler.name, samplerInfo, false);
-    }
-
-    for (const auto &sampler : resources.separate_samplers) {
-        uint32_t set =
-            compiler.get_decoration(sampler.id, spv::DecorationDescriptorSet);
-        uint32_t binding =
-            compiler.get_decoration(sampler.id, spv::DecorationBinding);
-
-        UniformBindingInfo samplerInfo;
-        samplerInfo.set = set;
-        samplerInfo.binding = binding;
-        samplerInfo.size = 0;
-        samplerInfo.offset = 0;
-        samplerInfo.isSampler = true;
-        samplerInfo.isBuffer = false;
-        samplerInfo.isStorageBuffer = false;
-        samplerInfo.isCubemap = false;
-        samplerInfo.resourceType = VK_DESCRIPTOR_TYPE_SAMPLER;
-        registerBinding(sampler.name, samplerInfo, false);
-    }
-
-    for (const auto &image : resources.separate_images) {
-        uint32_t set =
-            compiler.get_decoration(image.id, spv::DecorationDescriptorSet);
-        uint32_t binding =
-            compiler.get_decoration(image.id, spv::DecorationBinding);
-
-        UniformBindingInfo imageInfo;
-        imageInfo.set = set;
-        imageInfo.binding = binding;
-        imageInfo.size = 0;
-        imageInfo.offset = 0;
-        imageInfo.isSampler = true;
-        imageInfo.isBuffer = false;
-        imageInfo.isStorageBuffer = false;
-        imageInfo.isCubemap = false;
-        imageInfo.resourceType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-        registerBinding(image.name, imageInfo, false);
-    }
-
-    for (const auto &image : resources.storage_images) {
-        UniformBindingInfo info{};
-        info.set =
-            compiler.get_decoration(image.id, spv::DecorationDescriptorSet);
-        info.binding =
-            compiler.get_decoration(image.id, spv::DecorationBinding);
-        info.isSampler = true;
-        info.resourceType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        registerBinding(compiler.get_name(image.id), info, false);
-    }
-
-    for (const auto &ssbo : resources.storage_buffers) {
-        uint32_t set =
-            compiler.get_decoration(ssbo.id, spv::DecorationDescriptorSet);
-        uint32_t binding =
-            compiler.get_decoration(ssbo.id, spv::DecorationBinding);
-
-        UniformBindingInfo ssboInfo;
-        ssboInfo.set = set;
-        ssboInfo.binding = binding;
-        ssboInfo.size = 0;
-        ssboInfo.offset = 0;
-        ssboInfo.isSampler = false;
-        ssboInfo.isBuffer = true;
-        ssboInfo.isStorageBuffer = true;
-        ssboInfo.isCubemap = false;
-        registerBinding(ssbo.name, ssboInfo, true);
-        registerBinding(compiler.get_name(ssbo.id), ssboInfo, true);
-    }
-}
-
-const UniformBindingInfo *
-ShaderProgram::findUniform(const std::string &name) const {
-    auto it = uniformBindings.find(name);
-    if (it != uniformBindings.end()) {
-        return &it->second;
-    }
-    return nullptr;
-}
-#endif
 
 } // namespace opal

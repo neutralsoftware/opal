@@ -388,9 +388,6 @@ std::shared_ptr<Texture> Texture::create(TextureType type, TextureFormat format,
     }
 
     return emitCreated(texture);
-#elif defined(VULKAN)
-    return emitCreated(Texture::createVulkan(type, format, width, height,
-                                             dataFormat, data, mipLevels));
 #elif defined(METAL)
     if (Device::globalInstance == nullptr) {
         throw std::runtime_error("Cannot create Metal texture without device");
@@ -481,121 +478,6 @@ void Texture::updateFace(int faceIndex, const void *data, int width, int height,
         glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + faceIndex, 0, glFormat,
                      width, height, 0, glDataFmt, GL_UNSIGNED_BYTE, data);
     }
-#elif defined(VULKAN)
-    if (data == nullptr || width <= 0 || height <= 0 ||
-        vkImage == VK_NULL_HANDLE) {
-        return;
-    }
-
-    size_t bytesPerPixel = 4;
-    if (dataFormat == TextureDataFormat::Rgb) {
-        bytesPerPixel = 3;
-    } else if (dataFormat == TextureDataFormat::Red) {
-        bytesPerPixel = 1;
-    }
-
-    size_t pixelCount = static_cast<size_t>(width) * height;
-    VkDeviceSize imageSize = pixelCount * 4;
-
-    VkBuffer stagingBuffer;
-    VkDeviceMemory stagingBufferMemory;
-    Buffer::createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                         stagingBuffer, stagingBufferMemory);
-
-    void *mappedData;
-    vkMapMemory(Device::globalDevice, stagingBufferMemory, 0, imageSize, 0,
-                &mappedData);
-
-    if (bytesPerPixel == 3) {
-        const auto *src = static_cast<const uint8_t *>(data);
-        auto *dst = static_cast<uint8_t *>(mappedData);
-        for (size_t i = 0; i < pixelCount; ++i) {
-            dst[i * 4 + 0] = src[i * 3 + 0];
-            dst[i * 4 + 1] = src[i * 3 + 1];
-            dst[i * 4 + 2] = src[i * 3 + 2];
-            dst[i * 4 + 3] = 255;
-        }
-    } else if (bytesPerPixel == 1) {
-        const auto *src = static_cast<const uint8_t *>(data);
-        auto *dst = static_cast<uint8_t *>(mappedData);
-        for (size_t i = 0; i < pixelCount; ++i) {
-            dst[i * 4 + 0] = src[i];
-            dst[i * 4 + 1] = src[i];
-            dst[i * 4 + 2] = src[i];
-            dst[i * 4 + 3] = 255;
-        }
-    } else {
-        memcpy(mappedData, data, pixelCount * bytesPerPixel);
-    }
-
-    vkUnmapMemory(Device::globalDevice, stagingBufferMemory);
-
-    VkFormat vkFormat = opalTextureFormatToVulkanFormat(format);
-
-    if (currentLayout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-        Framebuffer::transitionImageLayout(vkImage, vkFormat, currentLayout,
-                                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                           6);
-        currentLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    }
-
-    VkCommandBufferAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandPool = Device::globalInstance->commandPool;
-    allocInfo.commandBufferCount = 1;
-
-    VkCommandBuffer commandBuffer;
-    vkAllocateCommandBuffers(Device::globalDevice, &allocInfo, &commandBuffer);
-
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-    vkBeginCommandBuffer(commandBuffer, &beginInfo);
-
-    VkBufferImageCopy region{};
-    region.bufferOffset = 0;
-    region.bufferRowLength = 0;
-    region.bufferImageHeight = 0;
-    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    region.imageSubresource.mipLevel = 0;
-    region.imageSubresource.baseArrayLayer = static_cast<uint32_t>(faceIndex);
-    region.imageSubresource.layerCount = 1;
-    region.imageOffset = {.x = 0, .y = 0, .z = 0};
-    region.imageExtent = {.width = static_cast<uint32_t>(width),
-                          .height = static_cast<uint32_t>(height),
-                          .depth = 1};
-
-    vkCmdCopyBufferToImage(commandBuffer, stagingBuffer, vkImage,
-                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-
-    vkEndCommandBuffer(commandBuffer);
-
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &commandBuffer;
-
-    vkQueueSubmit(Device::globalInstance->graphicsQueue, 1, &submitInfo,
-                  VK_NULL_HANDLE);
-    vkQueueWaitIdle(Device::globalInstance->graphicsQueue);
-
-    vkFreeCommandBuffers(Device::globalDevice,
-                         Device::globalInstance->commandPool, 1,
-                         &commandBuffer);
-
-    if (faceIndex == 5) {
-        Framebuffer::transitionImageLayout(
-            vkImage, vkFormat, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 6);
-        currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    }
-
-    vkDestroyBuffer(Device::globalDevice, stagingBuffer, nullptr);
-    vkFreeMemory(Device::globalDevice, stagingBufferMemory, nullptr);
 #elif defined(METAL)
     auto &state = metal::textureState(this);
     if (state.texture == nullptr || data == nullptr || width <= 0 ||
@@ -632,12 +514,6 @@ void Texture::updateData3D(const void *data, int width, int height, int depth,
     glBindTexture(GL_TEXTURE_3D, textureID);
     glTexImage3D(GL_TEXTURE_3D, 0, glFormat, width, height, depth, 0, glDataFmt,
                  GL_UNSIGNED_BYTE, data);
-#elif defined(VULKAN)
-    (void)data;
-    (void)width;
-    (void)height;
-    (void)depth;
-    (void)dataFormat;
 #elif defined(METAL)
     auto &state = metal::textureState(this);
     if (state.texture == nullptr || data == nullptr || width <= 0 ||
@@ -686,11 +562,6 @@ void Texture::updateData(const void *data, int width, int height,
         this->width = width;
         this->height = height;
     }
-#elif defined(VULKAN)
-    (void)data;
-    (void)width;
-    (void)height;
-    (void)dataFormat;
 #elif defined(METAL)
     auto &state = metal::textureState(this);
     if (state.texture == nullptr || data == nullptr || width <= 0 ||
@@ -719,8 +590,6 @@ void Texture::changeFormat(TextureFormat newFormat) {
 #ifdef OPENGL
     this->format = newFormat;
     this->glFormat = getGLInternalFormat(newFormat);
-#elif defined(VULKAN)
-    this->format = newFormat;
 #elif defined(METAL)
     this->format = newFormat;
     metal::textureState(this).format = newFormat;
@@ -751,9 +620,6 @@ void Texture::readData(void *buffer, TextureDataFormat dataFormat) {
         break;
     }
     glGetTexImage(this->glType, 0, glDataFormat, glDataType, buffer);
-#elif defined(VULKAN)
-    (void)buffer;
-    (void)dataFormat;
 #elif defined(METAL)
     auto &state = metal::textureState(this);
     if (state.texture == nullptr || buffer == nullptr || width <= 0 ||
@@ -783,7 +649,6 @@ void Texture::generateMipmaps([[maybe_unused]] uint levels) {
 #ifdef OPENGL
     glBindTexture(this->glType, textureID);
     glGenerateMipmap(this->glType);
-#elif defined(VULKAN)
 #elif defined(METAL)
     if (Device::globalInstance == nullptr) {
         return;
@@ -806,7 +671,6 @@ void Texture::automaticallyGenerateMipmaps() {
 #ifdef OPENGL
     glBindTexture(this->glType, textureID);
     glGenerateMipmap(this->glType);
-#elif defined(VULKAN)
 #elif defined(METAL)
     generateMipmaps(0);
 #endif
@@ -819,9 +683,6 @@ void Texture::setWrapMode(TextureAxis axis, TextureWrapMode mode) {
     static constexpr GLenum axisTable[] = {GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T,
                                            GL_TEXTURE_WRAP_R};
     glTexParameteri(this->glType, axisTable[static_cast<int>(axis)], glMode);
-#elif defined(VULKAN)
-    (void)axis;
-    (void)mode;
 #elif defined(METAL)
     auto &state = metal::textureState(this);
     if (axis == TextureAxis::S) {
@@ -844,8 +705,6 @@ void Texture::changeBorderColor(const glm::vec4 &borderColor) {
     GLfloat color[4] = {borderColor.r, borderColor.g, borderColor.b,
                         borderColor.a};
     glTexParameterfv(this->glType, GL_TEXTURE_BORDER_COLOR, color);
-#elif defined(VULKAN)
-    (void)borderColor;
 #elif defined(METAL)
     auto &state = metal::textureState(this);
     state.borderColor = borderColor;
@@ -862,9 +721,6 @@ void Texture::setFilterMode(TextureFilterMode minFilter,
     glBindTexture(this->glType, textureID);
     glTexParameteri(glType, GL_TEXTURE_MIN_FILTER, getGLFilterMode(minFilter));
     glTexParameteri(glType, GL_TEXTURE_MAG_FILTER, getGLFilterMode(magFilter));
-#elif defined(VULKAN)
-    (void)minFilter;
-    (void)magFilter;
 #elif defined(METAL)
     auto &state = metal::textureState(this);
     state.minFilter = minFilter;
@@ -885,11 +741,6 @@ void Texture::setParameters(TextureWrapMode wrapS, TextureWrapMode wrapT,
     glTexParameteri(glType, GL_TEXTURE_WRAP_T, getGLWrapMode(wrapT));
     glTexParameteri(glType, GL_TEXTURE_MIN_FILTER, getGLFilterMode(minFilter));
     glTexParameteri(glType, GL_TEXTURE_MAG_FILTER, getGLFilterMode(magFilter));
-#elif defined(VULKAN)
-    (void)wrapS;
-    (void)wrapT;
-    (void)minFilter;
-    (void)magFilter;
 #elif defined(METAL)
     auto &state = metal::textureState(this);
     state.wrapS = wrapS;
@@ -914,12 +765,6 @@ void Texture::setParameters3D(TextureWrapMode wrapS, TextureWrapMode wrapT,
     glTexParameteri(glType, GL_TEXTURE_WRAP_R, getGLWrapMode(wrapR));
     glTexParameteri(glType, GL_TEXTURE_MIN_FILTER, getGLFilterMode(minFilter));
     glTexParameteri(glType, GL_TEXTURE_MAG_FILTER, getGLFilterMode(magFilter));
-#elif defined(VULKAN)
-    (void)wrapS;
-    (void)wrapT;
-    (void)wrapR;
-    (void)minFilter;
-    (void)magFilter;
 #elif defined(METAL)
     auto &state = metal::textureState(this);
     state.wrapS = wrapS;
@@ -942,56 +787,6 @@ void Pipeline::bindTexture(const std::string &name,
     glBindTexture(texture->glType, texture->textureID);
     int location = glGetUniformLocation(shaderProgram->programID, name.c_str());
     glUniform1i(location, unit);
-#elif defined(VULKAN)
-    if (!shaderProgram || texture == nullptr) {
-        return;
-    }
-    const UniformBindingInfo *info = shaderProgram->findUniform(name);
-    if (info == nullptr || !info->isSampler) {
-        return;
-    }
-
-    ensureDescriptorResources();
-    if (descriptorSets.size() <= info->set ||
-        descriptorSets[info->set] == VK_NULL_HANDLE) {
-        return;
-    }
-
-    VkImageLayout desiredLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    if (texture->currentLayout != desiredLayout &&
-        texture->currentLayout != VK_IMAGE_LAYOUT_GENERAL) {
-        VkFormat vkFormat = opalTextureFormatToVulkanFormat(texture->format);
-        bool isDepth = (texture->format == TextureFormat::Depth24Stencil8 ||
-                        texture->format == TextureFormat::DepthComponent24 ||
-                        texture->format == TextureFormat::Depth32F);
-
-        if (!isDepth || texture->currentLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
-            uint32_t layerCount =
-                (texture->type == TextureType::TextureCubeMap) ? 6 : 1;
-            Framebuffer::transitionImageLayout(texture->vkImage, vkFormat,
-                                               texture->currentLayout,
-                                               desiredLayout, layerCount);
-            texture->currentLayout = desiredLayout;
-        }
-    }
-
-    VkDescriptorImageInfo imageInfo{};
-    imageInfo.sampler = texture->vkSampler;
-    imageInfo.imageView = texture->vkImageView;
-    imageInfo.imageLayout =
-        (texture->currentLayout == VK_IMAGE_LAYOUT_UNDEFINED)
-            ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-            : texture->currentLayout;
-
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = descriptorSets[info->set];
-    write.dstBinding = info->binding;
-    write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    write.pImageInfo = &imageInfo;
-
-    vkUpdateDescriptorSets(Device::globalDevice, 1, &write, 0, nullptr);
 #elif defined(METAL)
     auto &state = metal::pipelineState(this);
     int resolvedUnit = unit;
@@ -1078,9 +873,6 @@ void Pipeline::bindTexture2D(const std::string &name, uint textureId, int unit,
     int location = glGetUniformLocation(shaderProgram->programID, name.c_str());
     glUniform1i(location, unit);
     (void)callerId;
-#elif defined(VULKAN)
-    auto texture = Texture::getTextureFromHandle(textureId);
-    bindTexture(name, texture, unit, callerId);
 #elif defined(METAL)
     auto texture = metal::getTextureFromHandle(textureId);
     bindTexture(name, texture, unit, callerId);
@@ -1096,9 +888,6 @@ void Pipeline::bindTexture3D(const std::string &name, uint textureId, int unit,
     glUniform1i(location, unit);
     (void)callerId;
 
-#elif defined(VULKAN)
-    auto texture = Texture::getTextureFromHandle(textureId);
-    bindTexture(name, texture, unit, callerId);
 #elif defined(METAL)
     auto texture = metal::getTextureFromHandle(textureId);
     bindTexture(name, texture, unit, callerId);
@@ -1113,9 +902,6 @@ void Pipeline::bindTextureCubemap(const std::string &name, uint textureId,
     int location = glGetUniformLocation(shaderProgram->programID, name.c_str());
     glUniform1i(location, unit);
     (void)callerId;
-#elif defined(VULKAN)
-    auto texture = Texture::getTextureFromHandle(textureId);
-    bindTexture(name, texture, unit, callerId);
 #elif defined(METAL)
     auto texture = metal::getTextureFromHandle(textureId);
     bindTexture(name, texture, unit, callerId);
@@ -1139,8 +925,6 @@ std::shared_ptr<Texture> Texture::createMultisampled(TextureFormat format,
                             height, GL_TRUE);
 
     return texture;
-#elif defined(VULKAN)
-    return Texture::createMultisampledVulkan(format, width, height, samples);
 #elif defined(METAL)
     return Texture::create(TextureType::Texture2DMultisample, format, width,
                            height, TextureDataFormat::Rgba, nullptr,
@@ -1179,8 +963,6 @@ std::shared_ptr<Texture> Texture::createDepthCubemap(TextureFormat format,
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
 
     return texture;
-#elif defined(VULKAN)
-    return Texture::createDepthCubemapVulkan(format, resolution);
 #elif defined(METAL)
     return Texture::create(TextureType::TextureCubeMap, format, resolution,
                            resolution, TextureDataFormat::DepthComponent,
@@ -1231,9 +1013,6 @@ std::shared_ptr<Texture> Texture::create3D(TextureFormat format, int width,
     glPixelStorei(GL_UNPACK_ALIGNMENT, previousAlignment);
 
     return texture;
-#elif defined(VULKAN)
-    return Texture::create3DVulkan(format, width, height, depth, dataFormat,
-                                   data);
 #elif defined(METAL)
     if (Device::globalInstance == nullptr) {
         throw std::runtime_error(
@@ -1292,42 +1071,5 @@ std::shared_ptr<Texture> Texture::create3D(TextureFormat format, int width,
 #endif
 }
 
-#ifdef VULKAN
-uint32_t Texture::nextTextureHandle = 1;
-std::unordered_map<uint32_t, std::weak_ptr<Texture>>
-    Texture::textureHandleRegistry;
-
-uint32_t
-Texture::registerTextureHandle(const std::shared_ptr<Texture> &texture) {
-    if (!texture) {
-        return 0;
-    }
-
-    uint32_t handle = nextTextureHandle++;
-    if (handle == 0) {
-        handle = nextTextureHandle++;
-    }
-
-    textureHandleRegistry[handle] = texture;
-    return handle;
-}
-
-std::shared_ptr<Texture> Texture::getTextureFromHandle(uint32_t handle) {
-    if (handle == 0) {
-        return nullptr;
-    }
-
-    auto it = textureHandleRegistry.find(handle);
-    if (it == textureHandleRegistry.end()) {
-        return nullptr;
-    }
-
-    auto texture = it->second.lock();
-    if (!texture) {
-        textureHandleRegistry.erase(it);
-    }
-    return texture;
-}
-#endif
 
 } // namespace opal

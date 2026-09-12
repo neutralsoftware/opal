@@ -11,9 +11,6 @@
 #define OPAL_H
 
 #include <SDL3/SDL.h>
-#ifdef VULKAN
-#include <vulkan/vulkan.hpp>
-#endif
 #include <cstddef>
 #include <cstdint>
 #include <glm/glm.hpp>
@@ -136,39 +133,13 @@ class Context {
     bool hidden = false;
     int samples = 0;
 
-#ifdef VULKAN
-    void createInstance();
-    void setupMessenger();
-    void setupSurface();
-    std::vector<const char *> getExtensions();
-
-    static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
-        VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
-        VkDebugUtilsMessageTypeFlagsEXT,
-        const VkDebugUtilsMessengerCallbackDataEXT *pCallbackData, void *);
-
-    bool hasValidationLayer();
-
-    VkInstance instance = VK_NULL_HANDLE;
-    VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
-    VkSurfaceKHR surface = VK_NULL_HANDLE;
-#endif
 };
 
 class CommandBuffer;
 class Framebuffer;
 class Buffer;
 class Texture;
-#ifdef VULKAN
-class CoreRenderPass;
-#endif
 
-#ifdef VULKAN
-struct ImageCollection {
-    std::vector<VkImage> images;
-    std::vector<VkImageView> imageViews;
-};
-#endif
 
 struct DeviceInfo {
     /** @brief GPU/adapter name reported by the backend. */
@@ -235,74 +206,6 @@ class Device {
     std::shared_ptr<Context> context = nullptr;
     static Device *globalInstance;
 
-#ifdef VULKAN
-    static VkDevice globalDevice;
-
-    VkDevice logicalDevice = VK_NULL_HANDLE;
-    VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
-    VkQueue graphicsQueue = VK_NULL_HANDLE;
-    VkQueue presentQueue = VK_NULL_HANDLE;
-
-    VkSwapchainKHR swapChain = VK_NULL_HANDLE;
-    ImageCollection swapChainImages;
-    VkExtent2D swapChainExtent = {};
-    VkFormat swapChainImageFormat = VK_FORMAT_UNDEFINED;
-
-    VkCommandPool commandPool = VK_NULL_HANDLE;
-
-    bool swapchainDirty = false;
-
-    struct QueueFamilyIndices {
-        std::optional<uint32_t> graphicsFamily;
-        std::optional<uint32_t> presentFamily;
-
-        bool isComplete() {
-            return graphicsFamily.has_value() && presentFamily.has_value();
-        }
-    };
-
-    bool deviceMeetsRequirements(VkPhysicalDevice device);
-    void pickPhysicalDevice(std::shared_ptr<Context> context);
-    void createLogicalDevice(std::shared_ptr<Context> context);
-    QueueFamilyIndices findQueueFamilies(VkPhysicalDevice device,
-                                         VkSurfaceKHR surface);
-
-    struct SwapChainSupportDetails {
-        VkSurfaceCapabilitiesKHR capabilities;
-        std::vector<VkSurfaceFormatKHR> formats;
-        std::vector<VkPresentModeKHR> presentModes;
-    };
-
-    SwapChainSupportDetails
-    querySwapChainSupport(VkPhysicalDevice device,
-                          std::shared_ptr<Context> context);
-    void createSwapChain(std::shared_ptr<Context> context);
-    void createImageViews();
-    bool supportsDeviceExtension(VkPhysicalDevice device,
-                                 const char *extension);
-
-    void destroySwapChainBrightTextures();
-    void createSwapChainBrightTextures();
-    std::vector<std::shared_ptr<Texture>> swapChainBrightTextures;
-
-    void destroySwapChainDepthTexture();
-    void createSwapChainDepthTexture();
-    std::shared_ptr<Texture> swapChainDepthTexture;
-
-    std::shared_ptr<Buffer> getDefaultInstanceBuffer();
-    std::shared_ptr<Buffer> defaultInstanceBuffer = nullptr;
-
-    void remakeSwapChain(std::shared_ptr<Context> context);
-    VkSurfaceFormatKHR chooseSwapSurfaceFormat(
-        const std::vector<VkSurfaceFormatKHR> &availableFormats);
-    VkPresentModeKHR chooseSwapPresentMode(
-        const std::vector<VkPresentModeKHR> &availablePresentModes);
-    VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR &capabilities,
-                                SDL_Window *window);
-    uint32_t findMemoryType(uint32_t typeFilter,
-                            VkMemoryPropertyFlags properties);
-
-#endif
 };
 
 enum class TextureType {
@@ -431,32 +334,6 @@ class Texture {
     uint mipLevels = 1;
     int samples = 1; // For multisampled textures
 
-#ifdef VULKAN
-    VkImage vkImage = VK_NULL_HANDLE;
-    VkDeviceMemory vkImageMemory = VK_NULL_HANDLE;
-    VkImageView vkImageView = VK_NULL_HANDLE;
-    VkSampler vkSampler = VK_NULL_HANDLE;
-    VkImageLayout currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    static std::shared_ptr<Texture> getTextureFromHandle(uint32_t handle);
-
-    static std::shared_ptr<Texture>
-    createVulkan(TextureType type, TextureFormat format, int width, int height,
-                 TextureDataFormat dataFormat = TextureDataFormat::Rgba,
-                 const void *data = nullptr, uint mipLevels = 1);
-
-    static std::shared_ptr<Texture>
-    createMultisampledVulkan(TextureFormat format, int width, int height,
-                             int samples = 4);
-
-    static std::shared_ptr<Texture>
-    createDepthCubemapVulkan(TextureFormat format, int resolution);
-
-    static std::shared_ptr<Texture>
-    create3DVulkan(TextureFormat format, int width, int height, int depth,
-                   TextureDataFormat dataFormat = TextureDataFormat::Rgba,
-                   const void *data = nullptr);
-#endif
 
   private:
     friend class Pipeline;
@@ -466,13 +343,6 @@ class Texture {
     uint glType = 0;
     uint glFormat = 0;
 
-#ifdef VULKAN
-    static uint32_t
-    registerTextureHandle(const std::shared_ptr<Texture> &texture);
-    static std::unordered_map<uint32_t, std::weak_ptr<Texture>>
-        textureHandleRegistry;
-    static uint32_t nextTextureHandle;
-#endif
 };
 
 enum class ShaderType {
@@ -484,22 +354,6 @@ enum class ShaderType {
     Compute
 };
 
-#ifdef VULKAN
-/**
- * @brief Describes a uniform buffer or resource binding location in SPIR-V
- */
-struct UniformBindingInfo {
-    uint32_t set;
-    uint32_t binding;
-    uint32_t size;
-    uint32_t offset;
-    bool isSampler;
-    bool isBuffer;
-    bool isStorageBuffer;
-    bool isCubemap;
-    VkDescriptorType resourceType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-};
-#endif
 
 class Shader {
   public:
@@ -522,18 +376,8 @@ class Shader {
     char *source = nullptr;
     std::string functionName;
 
-#ifdef VULKAN
-    VkShaderModule shaderModule = VK_NULL_HANDLE;
-    VkPipelineShaderStageCreateInfo makeShaderStageInfo() const;
 
-    std::vector<uint32_t> spirvBytecode;
-
-    std::unordered_map<std::string, UniformBindingInfo> uniformBindings;
-
-    void performReflection();
-#endif
-
-#if defined(VULKAN) || defined(METAL)
+#if defined(METAL)
     static int currentId;
 #endif
 
@@ -559,15 +403,8 @@ class ShaderProgram {
     std::vector<std::shared_ptr<Shader>> attachedShaders;
     bool isComputeProgram() const { return computeProgram; }
 
-#ifdef VULKAN
-    std::vector<VkPipelineShaderStageCreateInfo> getShaderStages() const;
 
-    std::unordered_map<std::string, UniformBindingInfo> uniformBindings;
-
-    const UniformBindingInfo *findUniform(const std::string &name) const;
-#endif
-
-#if defined(VULKAN) || defined(METAL)
+#if defined(METAL)
     static int currentId;
 #endif
 
@@ -777,86 +614,6 @@ class Pipeline {
                           uint32_t bufferIndex);
 #endif
 
-#ifdef VULKAN
-    VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-    VkPipelineDynamicStateCreateInfo dynamicState;
-    VkPipelineVertexInputStateCreateInfo vertexInputInfo;
-    VkPipelineInputAssemblyStateCreateInfo inputAssembly;
-    VkPipelineViewportStateCreateInfo viewportState;
-    VkPipelineRasterizationStateCreateInfo rasterizer;
-    VkPipelineMultisampleStateCreateInfo multisampling;
-    VkPipelineDepthStencilStateCreateInfo depthStencil;
-    VkPipelineColorBlendStateCreateInfo colorBlending;
-
-    std::vector<VkDynamicState> vkDynamicStates;
-    std::vector<VkVertexInputBindingDescription> vkBindingDescriptions;
-    std::vector<VkVertexInputAttributeDescription> vkAttributeDescriptions;
-    VkViewport vkViewport;
-    VkRect2D vkScissor;
-    std::vector<VkPipelineColorBlendAttachmentState> vkColorBlendAttachments;
-    bool hasInstanceAttributes = false;
-
-    VkFormat getFormat(VertexAttributeType type, uint size,
-                       bool normalized) const;
-    void buildPipelineLayout();
-
-    VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
-    std::vector<VkDescriptorSetLayout> descriptorSetLayouts;
-    std::vector<VkDescriptorSet> descriptorSets;
-
-    struct DescriptorBindingInfoEntry {
-        VkDescriptorType type = VK_DESCRIPTOR_TYPE_MAX_ENUM;
-        VkShaderStageFlags stageFlags = 0;
-        uint32_t count = 1;
-        uint32_t minBufferSize = 0;
-        bool isBuffer = false;
-        bool isSampler = false;
-        bool isCubemap = false;
-    };
-    std::map<uint32_t, std::map<uint32_t, DescriptorBindingInfoEntry>>
-        descriptorBindingInfo;
-
-    struct UniformBufferAllocation {
-        VkBuffer buffer = VK_NULL_HANDLE;
-        VkDeviceMemory memory = VK_NULL_HANDLE;
-        void *mappedData = nullptr;
-        VkDeviceSize size = 0;
-        VkDescriptorType descriptorType = VK_DESCRIPTOR_TYPE_MAX_ENUM;
-    };
-    std::unordered_map<uint64_t, UniformBufferAllocation> uniformBuffers;
-    std::unordered_map<uint64_t, std::shared_ptr<Buffer>> descriptorBuffers;
-
-    static uint64_t makeBindingKey(uint32_t set, uint32_t binding) {
-        return (static_cast<uint64_t>(set) << 32) | binding;
-    }
-
-    UniformBufferAllocation &
-    getOrCreateUniformBuffer(uint32_t set, uint32_t binding, VkDeviceSize size);
-
-    void updateUniformData(uint32_t set, uint32_t binding, uint32_t offset,
-                           const void *data, size_t size);
-
-    void buildDescriptorSets();
-    void ensureDescriptorResources();
-    void bindDescriptorSets(VkCommandBuffer commandBuffer);
-    void bindUniformBufferDescriptor(uint32_t set, uint32_t binding);
-    void bindSamplerDescriptor(uint32_t set, uint32_t binding,
-                               std::shared_ptr<Texture> texture);
-    void resetDescriptorSets();
-    const DescriptorBindingInfoEntry *
-    getDescriptorBindingInfo(uint32_t set, uint32_t binding) const;
-
-    static std::shared_ptr<Texture> getDummyTexture();
-    static std::shared_ptr<Texture> getDummyCubemap();
-
-    // Push constant support
-    std::vector<uint8_t> pushConstantData;
-    uint32_t pushConstantSize = 0;
-    VkShaderStageFlags pushConstantStages = 0;
-    void updatePushConstant(uint32_t offset, const void *data, size_t size);
-    void flushPushConstants(VkCommandBuffer commandBuffer);
-    bool pushConstantsDirty = false;
-#endif
 
     bool multisamplingEnabled = false;
 
@@ -944,18 +701,6 @@ class Buffer {
     BufferUsage usage;
     MemoryUsageType memoryUsage;
 
-#ifdef VULKAN
-    VkBuffer vkBuffer = VK_NULL_HANDLE;
-    VkBuffer stagingBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory vkStagingBufferMemory = VK_NULL_HANDLE;
-    VkDeviceMemory vkBufferMemory = VK_NULL_HANDLE;
-
-    static void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
-                             VkMemoryPropertyFlags properties, VkBuffer &buffer,
-                             VkDeviceMemory &bufferMemory);
-    static void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer,
-                           VkDeviceSize size);
-#endif
 };
 
 struct VertexAttributeBinding {
@@ -1086,42 +831,12 @@ class Framebuffer {
     std::vector<Attachment> attachments;
     bool isDefaultFramebuffer = false;
 
-#ifdef VULKAN
-    std::vector<VkFramebuffer> vkFramebuffers;
-
-    void createVulkanFramebuffers(std::shared_ptr<CoreRenderPass> renderPass);
-    static void transitionImageLayout(VkImage image, VkFormat format,
-                                      VkImageLayout oldLayout,
-                                      VkImageLayout newLayout,
-                                      uint32_t layerCount = 1);
-#endif
 
   private:
     bool colorBufferDisabled = false;
     int drawBufferCount = -1;
 };
 
-#ifdef VULKAN
-class CoreRenderPass {
-  public:
-    static std::shared_ptr<CoreRenderPass>
-    create(std::shared_ptr<Pipeline> pipeline,
-           std::shared_ptr<Framebuffer> framebuffer);
-
-    // Create a CoreRenderPass that reuses an existing VkRenderPass
-    // This is used when switching pipelines mid-render-pass
-    static std::shared_ptr<CoreRenderPass>
-    createWithExistingRenderPass(std::shared_ptr<Pipeline> pipeline,
-                                 std::shared_ptr<Framebuffer> framebuffer,
-                                 VkRenderPass existingRenderPass);
-
-    VkRenderPass renderPass = VK_NULL_HANDLE;
-    VkPipeline pipeline = VK_NULL_HANDLE;
-
-    std::shared_ptr<Pipeline> opalPipeline;
-    std::shared_ptr<Framebuffer> opalFramebuffer;
-};
-#endif
 
 class RenderPass {
   public:
@@ -1131,11 +846,6 @@ class RenderPass {
 
     std::shared_ptr<Framebuffer> framebuffer;
 
-#ifdef VULKAN
-    static std::vector<std::shared_ptr<CoreRenderPass>> cachedRenderPasses;
-    std::shared_ptr<CoreRenderPass> currentRenderPass;
-    void applyRenderPass();
-#endif
 };
 
 class ResolveAction {
@@ -1303,26 +1013,6 @@ class CommandBuffer {
 #endif
 
   private:
-#ifdef VULKAN
-    static constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 3;
-    std::vector<VkCommandBuffer> commandBuffers;
-    std::vector<VkSemaphore> imageAvailableSemaphores;
-    std::vector<VkSemaphore> renderFinishedSemaphores;
-    std::vector<VkFence> inFlightFences;
-    uint32_t currentFrame = 0;
-    uint32_t imageIndex = 0;
-    bool imageAcquired = false;
-    bool commandBufferBegan = false;
-    void record(uint32_t imageIndex);
-    void beginCommandBufferIfNeeded();
-    void createSyncObjects();
-    void bindVertexBuffersIfNeeded();
-
-    VkCommandBuffer getCurrentCommandBuffer() const {
-        return commandBuffers.empty() ? VK_NULL_HANDLE
-                                      : commandBuffers[currentFrame];
-    }
-#endif
 
     float clearColorValue[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     float clearDepthValue = 1.0f;
@@ -1339,9 +1029,6 @@ class CommandBuffer {
     Device *device = nullptr;
 };
 
-#ifdef VULKAN
-VkFormat opalTextureFormatToVulkanFormat(TextureFormat format);
-#endif
 
 } // namespace opal
 

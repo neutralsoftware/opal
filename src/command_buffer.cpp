@@ -1158,20 +1158,6 @@ std::shared_ptr<CommandBuffer> Device::acquireCommandBuffer() {
     auto commandBuffer = std::make_shared<CommandBuffer>();
     commandBuffer->device = this;
 
-#ifdef VULKAN
-    commandBuffer->commandBuffers.resize(CommandBuffer::MAX_FRAMES_IN_FLIGHT);
-
-    VkCommandBufferAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    allocInfo.commandPool = Device::globalInstance->commandPool;
-    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandBufferCount = CommandBuffer::MAX_FRAMES_IN_FLIGHT;
-    if (vkAllocateCommandBuffers(this->logicalDevice, &allocInfo,
-                                 commandBuffer->commandBuffers.data()) !=
-        VK_SUCCESS) {
-        throw std::runtime_error("Failed to allocate command buffers!");
-    }
-#endif
     return commandBuffer;
 }
 
@@ -1180,15 +1166,7 @@ void CommandBuffer::start() {
     boundDrawingState = nullptr;
     renderPass = nullptr;
     framebuffer = nullptr;
-#ifdef VULKAN
-    hasStarted = false;
-    imageAcquired = false;
-    commandBufferBegan = false;
-    this->createSyncObjects();
-    vkWaitForFences(device->logicalDevice, 1, &inFlightFences[currentFrame],
-                    VK_TRUE, UINT64_MAX);
-    vkResetFences(device->logicalDevice, 1, &inFlightFences[currentFrame]);
-#elif defined(METAL)
+#if defined(METAL)
     auto &state = metal::commandBufferState(this);
     for (size_t i = 0; i < state.inFlightCommandBuffers.size();) {
         auto *buffer = state.inFlightCommandBuffers[i];
@@ -1269,11 +1247,6 @@ void CommandBuffer::beginPass(std::shared_ptr<RenderPass> newRenderPass) {
 
 #ifdef OPENGL
     framebuffer->bind();
-#elif defined(VULKAN)
-    if (framebuffer->isDefaultFramebuffer && device != nullptr) {
-        framebuffer->width = static_cast<int>(device->swapChainExtent.width);
-        framebuffer->height = static_cast<int>(device->swapChainExtent.height);
-    }
 #elif defined(METAL)
     if (device == nullptr) {
         throw std::runtime_error("Metal command buffer has no device");
@@ -1412,26 +1385,7 @@ void CommandBuffer::beginSampled(
 }
 
 void CommandBuffer::endPass() {
-#ifdef VULKAN
-    if (hasStarted) {
-        vkCmdEndRenderPass(commandBuffers[currentFrame]);
-        hasStarted = false;
-
-        if (framebuffer != nullptr && !framebuffer->isDefaultFramebuffer) {
-            for (auto &attachment : framebuffer->attachments) {
-                if (attachment.texture != nullptr) {
-                    if (attachment.type == opal::Attachment::Type::Color) {
-                        attachment.texture->currentLayout =
-                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                    } else {
-                        attachment.texture->currentLayout =
-                            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-                    }
-                }
-            }
-        }
-    }
-#elif defined(METAL)
+#if defined(METAL)
     auto &state = metal::commandBufferState(this);
     if (state.encoder != nullptr) {
         state.encoder->endEncoding();
@@ -1458,76 +1412,7 @@ int CommandBuffer::getAndResetDrawCallCount() {
 }
 
 void CommandBuffer::commit() {
-#ifdef VULKAN
-    if (!imageAcquired && framebuffer != nullptr &&
-        framebuffer->isDefaultFramebuffer) {
-        if (renderPass == nullptr || renderPass->currentRenderPass == nullptr) {
-            detail::log(LogLevel::Warning,
-                        "commit(): Skipping frame - no render pass!");
-            return;
-        }
-
-        vkAcquireNextImageKHR(device->logicalDevice, device->swapChain,
-                              UINT64_MAX,
-                              imageAvailableSemaphores[currentFrame],
-                              VK_NULL_HANDLE, &imageIndex);
-        imageAcquired = true;
-
-        beginCommandBufferIfNeeded();
-        this->record(imageIndex);
-        hasStarted = true;
-    }
-
-    if (!imageAcquired) {
-        return;
-    }
-
-    if (hasStarted) {
-        vkCmdEndRenderPass(commandBuffers[currentFrame]);
-        hasStarted = false;
-    }
-
-    if (vkEndCommandBuffer(commandBuffers[currentFrame]) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to end command buffer recording!");
-    }
-
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-
-    VkSemaphore waitSemaphores[] = {imageAvailableSemaphores[currentFrame]};
-    VkPipelineStageFlags waitStages[] = {
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-    submitInfo.waitSemaphoreCount = 1;
-    submitInfo.pWaitSemaphores = waitSemaphores;
-    submitInfo.pWaitDstStageMask = waitStages;
-
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &commandBuffers[currentFrame];
-
-    VkSemaphore signalSemaphores[] = {renderFinishedSemaphores[currentFrame]};
-    submitInfo.signalSemaphoreCount = 1;
-    submitInfo.pSignalSemaphores = signalSemaphores;
-
-    if (vkQueueSubmit(device->graphicsQueue, 1, &submitInfo,
-                      inFlightFences[currentFrame]) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to submit draw command buffer!");
-    }
-
-    VkPresentInfoKHR presentInfo{};
-    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-    presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores = signalSemaphores;
-
-    VkSwapchainKHR swapChains[] = {device->swapChain};
-    presentInfo.swapchainCount = 1;
-    presentInfo.pSwapchains = swapChains;
-    presentInfo.pImageIndices = &imageIndex;
-
-    vkQueuePresentKHR(device->presentQueue, &presentInfo);
-
-    imageAcquired = false;
-    currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
-#elif defined(METAL)
+#if defined(METAL)
     auto &state = metal::commandBufferState(this);
     if (state.commandBuffer == nullptr) {
         if (state.passDescriptor != nullptr) {
@@ -1605,102 +1490,7 @@ void CommandBuffer::bindPipeline(const std::shared_ptr<Pipeline> &pipeline) {
     metal::pipelineState(pipeline.get()).suppressTextureReset = true;
 #endif
     pipeline->bind();
-#ifdef VULKAN
-#endif
     boundPipeline = pipeline;
-#ifdef VULKAN
-
-    std::shared_ptr<CoreRenderPass> coreRenderPass = nullptr;
-
-    for (auto &corePipeline : RenderPass::cachedRenderPasses) {
-        bool renderPassIsDefault =
-            renderPass->framebuffer->isDefaultFramebuffer;
-        bool cachedIsDefault =
-            corePipeline->opalFramebuffer->isDefaultFramebuffer;
-
-        bool framebufferMatch = false;
-        if (renderPassIsDefault && cachedIsDefault) {
-            framebufferMatch = true;
-        } else if (!renderPassIsDefault && !cachedIsDefault) {
-            framebufferMatch = (corePipeline->opalFramebuffer->attachments ==
-                                renderPass->framebuffer->attachments);
-        }
-
-        if (framebufferMatch && *corePipeline->opalPipeline == pipeline) {
-            renderPass->currentRenderPass = corePipeline;
-            coreRenderPass = corePipeline;
-            break;
-        }
-    }
-
-    if (coreRenderPass == nullptr) {
-        if (hasStarted && renderPass->currentRenderPass != nullptr &&
-            renderPass->currentRenderPass->renderPass != VK_NULL_HANDLE) {
-            coreRenderPass = CoreRenderPass::createWithExistingRenderPass(
-                pipeline, renderPass->framebuffer,
-                renderPass->currentRenderPass->renderPass);
-        } else {
-            coreRenderPass =
-                CoreRenderPass::create(pipeline, renderPass->framebuffer);
-        }
-        renderPass->currentRenderPass = coreRenderPass;
-    }
-
-    if (framebuffer->isDefaultFramebuffer) {
-        if (device->swapchainDirty || framebuffer->vkFramebuffers.size() == 0) {
-            framebuffer->vkFramebuffers.resize(
-                device->swapChainImages.imageViews.size());
-            if (device->swapChainBrightTextures.size() !=
-                device->swapChainImages.imageViews.size()) {
-                device->createSwapChainBrightTextures();
-            }
-            for (size_t i = 0; i < device->swapChainImages.imageViews.size();
-                 i++) {
-                auto &brightTextures = device->swapChainBrightTextures;
-                if (brightTextures.size() <= i ||
-                    brightTextures[i] == nullptr ||
-                    brightTextures[i]->vkImageView == VK_NULL_HANDLE) {
-                    throw std::runtime_error(
-                        "Swapchain bright attachments are not initialized");
-                }
-
-                std::vector<VkImageView> attachments = {
-                    device->swapChainImages.imageViews[i],
-                    brightTextures[i]->vkImageView};
-
-                if (device->swapChainDepthTexture != nullptr &&
-                    device->swapChainDepthTexture->vkImageView !=
-                        VK_NULL_HANDLE) {
-                    attachments.push_back(
-                        device->swapChainDepthTexture->vkImageView);
-                }
-
-                VkFramebufferCreateInfo framebufferInfo{};
-                framebufferInfo.sType =
-                    VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-                framebufferInfo.renderPass = coreRenderPass->renderPass;
-                framebufferInfo.attachmentCount =
-                    static_cast<uint32_t>(attachments.size());
-                framebufferInfo.pAttachments = attachments.data();
-                framebufferInfo.width = device->swapChainExtent.width;
-                framebufferInfo.height = device->swapChainExtent.height;
-                framebufferInfo.layers = 1;
-
-                if (vkCreateFramebuffer(
-                        device->logicalDevice, &framebufferInfo, nullptr,
-                        &framebuffer->vkFramebuffers[i]) != VK_SUCCESS) {
-                    throw std::runtime_error("failed to create framebuffer!");
-                }
-            }
-
-            device->swapchainDirty = false;
-        }
-    } else {
-        if (framebuffer->vkFramebuffers.empty()) {
-            framebuffer->createVulkanFramebuffers(coreRenderPass);
-        }
-    }
-#endif
 }
 
 void CommandBuffer::unbindPipeline() { boundPipeline = nullptr; }
@@ -1724,49 +1514,6 @@ auto CommandBuffer::draw(uint vertexCount, uint instanceCount, uint firstVertex,
     if (boundDrawingState != nullptr) {
         boundDrawingState->unbind();
     }
-#elif defined(VULKAN)
-    if (renderPass == nullptr || renderPass->currentRenderPass == nullptr) {
-        return;
-    }
-    if (!imageAcquired && framebuffer != nullptr &&
-        framebuffer->isDefaultFramebuffer) {
-        vkAcquireNextImageKHR(device->logicalDevice, device->swapChain,
-                              UINT64_MAX,
-                              imageAvailableSemaphores[currentFrame],
-                              VK_NULL_HANDLE, &imageIndex);
-        imageAcquired = true;
-    }
-    beginCommandBufferIfNeeded();
-    if (!hasStarted) {
-        this->record(imageIndex);
-        hasStarted = true;
-    }
-    vkCmdBindPipeline(commandBuffers[currentFrame],
-                      VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      renderPass->currentRenderPass->pipeline);
-    if (boundPipeline != nullptr) {
-        boundPipeline->bindDescriptorSets(commandBuffers[currentFrame]);
-    }
-    bindVertexBuffersIfNeeded();
-    if (boundPipeline != nullptr) {
-        VkViewport viewport = boundPipeline->vkViewport;
-        if (viewport.width != 0.0f) {
-            vkCmdSetViewport(commandBuffers[currentFrame], 0, 1, &viewport);
-        } else if (framebuffer != nullptr) {
-            VkViewport defaultViewport{};
-            defaultViewport.x = 0.0f;
-            defaultViewport.y = 0.0f;
-            defaultViewport.width = static_cast<float>(framebuffer->width);
-            defaultViewport.height = static_cast<float>(framebuffer->height);
-            defaultViewport.minDepth = 0.0f;
-            defaultViewport.maxDepth = 1.0f;
-            vkCmdSetViewport(commandBuffers[currentFrame], 0, 1,
-                             &defaultViewport);
-        }
-        boundPipeline->flushPushConstants(commandBuffers[currentFrame]);
-    }
-    vkCmdDraw(commandBuffers[currentFrame], vertexCount, instanceCount,
-              firstVertex, firstInstance);
 #elif defined(METAL)
     if (boundPipeline == nullptr || framebuffer == nullptr) {
         return;
@@ -1833,56 +1580,6 @@ void CommandBuffer::drawIndexed(uint indexCount, uint instanceCount,
     if (boundDrawingState != nullptr) {
         boundDrawingState->unbind();
     }
-#elif defined(VULKAN)
-    if (renderPass == nullptr || renderPass->currentRenderPass == nullptr) {
-        return;
-    }
-    if (!imageAcquired && framebuffer != nullptr &&
-        framebuffer->isDefaultFramebuffer) {
-        vkAcquireNextImageKHR(device->logicalDevice, device->swapChain,
-                              UINT64_MAX,
-                              imageAvailableSemaphores[currentFrame],
-                              VK_NULL_HANDLE, &imageIndex);
-        imageAcquired = true;
-    }
-    beginCommandBufferIfNeeded();
-    if (!hasStarted) {
-        this->record(imageIndex);
-        hasStarted = true;
-    }
-    vkCmdBindPipeline(commandBuffers[currentFrame],
-                      VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      renderPass->currentRenderPass->pipeline);
-    if (boundPipeline != nullptr) {
-        boundPipeline->bindDescriptorSets(commandBuffers[currentFrame]);
-    }
-    if (boundDrawingState != nullptr) {
-        bindVertexBuffersIfNeeded();
-        if (boundDrawingState->indexBuffer != nullptr) {
-            vkCmdBindIndexBuffer(commandBuffers[currentFrame],
-                                 boundDrawingState->indexBuffer->vkBuffer, 0,
-                                 VK_INDEX_TYPE_UINT32);
-        }
-    }
-    if (boundPipeline != nullptr) {
-        VkViewport viewport = boundPipeline->vkViewport;
-        if (viewport.width != 0.0f) {
-            vkCmdSetViewport(commandBuffers[currentFrame], 0, 1, &viewport);
-        } else if (framebuffer != nullptr) {
-            VkViewport defaultViewport{};
-            defaultViewport.x = 0.0f;
-            defaultViewport.y = 0.0f;
-            defaultViewport.width = static_cast<float>(framebuffer->width);
-            defaultViewport.height = static_cast<float>(framebuffer->height);
-            defaultViewport.minDepth = 0.0f;
-            defaultViewport.maxDepth = 1.0f;
-            vkCmdSetViewport(commandBuffers[currentFrame], 0, 1,
-                             &defaultViewport);
-        }
-        boundPipeline->flushPushConstants(commandBuffers[currentFrame]);
-    }
-    vkCmdDrawIndexed(commandBuffers[currentFrame], indexCount, instanceCount,
-                     firstIndex, vertexOffset, firstInstance);
 #elif defined(METAL)
     if (boundPipeline == nullptr || framebuffer == nullptr) {
         return;
@@ -1955,101 +1652,6 @@ void CommandBuffer::drawPatches(uint vertexCount, uint firstVertex,
     if (boundDrawingState != nullptr) {
         boundDrawingState->unbind();
     }
-#elif defined(VULKAN)
-    if (renderPass == nullptr || renderPass->currentRenderPass == nullptr) {
-        return;
-    }
-    if (!imageAcquired && framebuffer != nullptr &&
-        framebuffer->isDefaultFramebuffer) {
-        VkResult result = vkAcquireNextImageKHR(
-            device->logicalDevice, device->swapChain, UINT64_MAX,
-            imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE,
-            &imageIndex);
-        imageAcquired = true;
-        if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-            device->remakeSwapChain(device->context);
-            if (framebuffer->isDefaultFramebuffer) {
-                framebuffer->vkFramebuffers.resize(
-                    device->swapChainImages.imageViews.size());
-                if (device->swapChainBrightTextures.size() !=
-                    device->swapChainImages.imageViews.size()) {
-                    device->createSwapChainBrightTextures();
-                }
-                for (size_t i = 0;
-                     i < device->swapChainImages.imageViews.size(); i++) {
-                    auto &brightTextures = device->swapChainBrightTextures;
-                    if (brightTextures.size() <= i ||
-                        brightTextures[i] == nullptr ||
-                        brightTextures[i]->vkImageView == VK_NULL_HANDLE) {
-                        throw std::runtime_error(
-                            "Swapchain bright attachments are not initialized");
-                    }
-
-                    std::vector<VkImageView> attachments = {
-                        device->swapChainImages.imageViews[i],
-                        brightTextures[i]->vkImageView};
-
-                    if (device->swapChainDepthTexture != nullptr &&
-                        device->swapChainDepthTexture->vkImageView !=
-                            VK_NULL_HANDLE) {
-                        attachments.push_back(
-                            device->swapChainDepthTexture->vkImageView);
-                    }
-
-                    VkFramebufferCreateInfo framebufferInfo{};
-                    framebufferInfo.sType =
-                        VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-                    framebufferInfo.renderPass =
-                        renderPass->currentRenderPass->renderPass;
-                    framebufferInfo.attachmentCount =
-                        static_cast<uint32_t>(attachments.size());
-                    framebufferInfo.pAttachments = attachments.data();
-                    framebufferInfo.width = device->swapChainExtent.width;
-                    framebufferInfo.height = device->swapChainExtent.height;
-                    framebufferInfo.layers = 1;
-
-                    if (vkCreateFramebuffer(
-                            device->logicalDevice, &framebufferInfo, nullptr,
-                            &framebuffer->vkFramebuffers[i]) != VK_SUCCESS) {
-                        throw std::runtime_error(
-                            "failed to create framebuffer!");
-                    }
-                }
-            } else {
-                device->swapchainDirty = true;
-            }
-        }
-    }
-    beginCommandBufferIfNeeded();
-    if (!hasStarted) {
-        this->record(imageIndex);
-        hasStarted = true;
-    }
-    vkCmdBindPipeline(commandBuffers[currentFrame],
-                      VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      renderPass->currentRenderPass->pipeline);
-    if (boundPipeline != nullptr) {
-        boundPipeline->bindDescriptorSets(commandBuffers[currentFrame]);
-    }
-    bindVertexBuffersIfNeeded();
-    if (boundPipeline != nullptr) {
-        VkViewport viewport = boundPipeline->vkViewport;
-        if (viewport.width != 0.0f) {
-            vkCmdSetViewport(commandBuffers[currentFrame], 0, 1, &viewport);
-        } else if (framebuffer != nullptr) {
-            VkViewport defaultViewport{};
-            defaultViewport.x = 0.0f;
-            defaultViewport.y = 0.0f;
-            defaultViewport.width = static_cast<float>(framebuffer->width);
-            defaultViewport.height = static_cast<float>(framebuffer->height);
-            defaultViewport.minDepth = 0.0f;
-            defaultViewport.maxDepth = 1.0f;
-            vkCmdSetViewport(commandBuffers[currentFrame], 0, 1,
-                             &defaultViewport);
-        }
-        boundPipeline->flushPushConstants(commandBuffers[currentFrame]);
-    }
-    vkCmdDraw(commandBuffers[currentFrame], vertexCount, 1, firstVertex, 0);
 #elif defined(METAL)
     if (boundPipeline == nullptr || framebuffer == nullptr) {
         return;
@@ -2103,11 +1705,6 @@ void CommandBuffer::dispatch(uint threadCountX, uint threadCountY,
     (void)threadCountY;
     (void)threadCountZ;
     throw std::runtime_error("Compute dispatch is not supported on OpenGL");
-#elif defined(VULKAN)
-    (void)threadCountX;
-    (void)threadCountY;
-    (void)threadCountZ;
-    throw std::runtime_error("Compute dispatch is not implemented for Vulkan");
 #elif defined(METAL)
     if (boundPipeline == nullptr || boundPipeline->shaderProgram == nullptr) {
         return;
@@ -2268,49 +1865,6 @@ bool CommandBuffer::performSpatialUpscale(
 #endif
 }
 
-#ifdef VULKAN
-void CommandBuffer::bindVertexBuffersIfNeeded() {
-    if (boundDrawingState == nullptr ||
-        boundDrawingState->vertexBuffer == nullptr) {
-        return;
-    }
-
-    Pipeline *activePipeline = nullptr;
-    if (renderPass != nullptr && renderPass->currentRenderPass != nullptr &&
-        renderPass->currentRenderPass->opalPipeline != nullptr) {
-        activePipeline = renderPass->currentRenderPass->opalPipeline.get();
-    }
-
-    std::array<VkBuffer, 2> buffers = {
-        boundDrawingState->vertexBuffer->vkBuffer, VK_NULL_HANDLE};
-    std::array<VkDeviceSize, 2> offsets = {0, 0};
-    uint32_t bindingCount = 1;
-
-    bool needsInstanceBinding =
-        activePipeline != nullptr && activePipeline->hasInstanceAttributes;
-
-    VkBuffer instanceBufferHandle = VK_NULL_HANDLE;
-    if (boundDrawingState->instanceBuffer != nullptr) {
-        instanceBufferHandle = boundDrawingState->instanceBuffer->vkBuffer;
-    }
-
-    if (needsInstanceBinding && instanceBufferHandle == VK_NULL_HANDLE &&
-        device != nullptr) {
-        auto fallback = device->getDefaultInstanceBuffer();
-        if (fallback != nullptr) {
-            instanceBufferHandle = fallback->vkBuffer;
-        }
-    }
-
-    if (needsInstanceBinding || instanceBufferHandle != VK_NULL_HANDLE) {
-        buffers[1] = instanceBufferHandle;
-        bindingCount = 2;
-    }
-
-    vkCmdBindVertexBuffers(commandBuffers[currentFrame], 0, bindingCount,
-                           buffers.data(), offsets.data());
-}
-#endif
 
 void CommandBuffer::clearColor(float r, float g, float b, float a) {
 #ifdef OPENGL
