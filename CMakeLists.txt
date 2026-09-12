@@ -80,6 +80,7 @@ target_include_directories(opal
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/src/metal
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan
         ${CMAKE_CURRENT_SOURCE_DIR}/third-party
 )
 
@@ -123,15 +124,9 @@ elseif(OPAL_RESOLVED_BACKEND STREQUAL "VULKAN")
     find_package(spirv_cross_glsl REQUIRED)
     find_package(spirv_cross_reflect REQUIRED)
 
+    file(GLOB_RECURSE OPAL_VULKAN_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan/*.cpp   )
     target_sources(opal PRIVATE
-        src/vulkan/buffer.cpp
-        src/vulkan/framebuffer.cpp
-        src/vulkan/pipeline.cpp
-        src/vulkan/render.cpp
-        src/vulkan/setup.cpp
-        src/vulkan/swapchain.cpp
-        src/vulkan/texture.cpp
-        src/vulkan/vulkanDevice.cpp
+        ${OPAL_VULKAN_SRCS}
     )
 
     target_compile_definitions(opal PUBLIC
