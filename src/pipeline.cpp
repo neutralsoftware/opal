@@ -7,15 +7,15 @@
 // Copyright (c) 2025 maxvdec
 //
 
-#include "opal/opal.h"
-#include <glad/glad.h>
 #include "diagnostics.h"
+#include "opal/opal.h"
 #include <algorithm>
 #include <cstring>
+#include <glad/glad.h>
 #include <memory>
 #include <stdexcept>
-#include <utility>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 #ifdef METAL
 #include "metal_state.h"
@@ -1539,7 +1539,10 @@ void Pipeline::bindSamplerDescriptor(uint32_t set, uint32_t binding,
         return;
     }
 
-    VkImageLayout desiredLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkImageLayout desiredLayout =
+        info->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+            ? VK_IMAGE_LAYOUT_GENERAL
+            : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     if (texture->currentLayout != desiredLayout &&
         texture->currentLayout != VK_IMAGE_LAYOUT_GENERAL) {
         VkFormat vkFormat = opalTextureFormatToVulkanFormat(texture->format);
@@ -1570,7 +1573,7 @@ void Pipeline::bindSamplerDescriptor(uint32_t set, uint32_t binding,
     write.dstSet = descriptorSets[set];
     write.dstBinding = binding;
     write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.descriptorType = info->type;
     write.pImageInfo = &imageInfo;
 
     vkUpdateDescriptorSets(Device::globalDevice, 1, &write, 0, nullptr);
