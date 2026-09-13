@@ -21,8 +21,17 @@ std::unordered_map<Context *, ContextState> &contextStatesStorage() {
     return *states;
 }
 
+std::unordered_map<Device *, DeviceState> &deviceStatesStorage() {
+    static auto *states = new std::unordered_map<Device *, DeviceState>();
+    return *states;
+}
+
 ContextState &contextState(Context *context) {
     return contextStatesStorage()[context];
+}
+
+DeviceState &deviceState(Device *device) {
+    return deviceStatesStorage()[device];
 }
 
 void releaseContextState(Context *context) {
@@ -36,6 +45,22 @@ void releaseContextState(Context *context) {
     }
     vkDestroyInstance(it->second.instance, nullptr);
     it->second.instance = VK_NULL_HANDLE;
+    states.erase(it);
+}
+
+void releaseDeviceState(Device *device) {
+    if (device == nullptr) {
+        return;
+    }
+    auto &states = deviceStatesStorage();
+    auto it = states.find(device);
+    if (it == states.end()) {
+        return;
+    }
+    if (it->second.device != VK_NULL_HANDLE) {
+        vkDestroyDevice(it->second.device, nullptr);
+        it->second.device = VK_NULL_HANDLE;
+    }
     states.erase(it);
 }
 
