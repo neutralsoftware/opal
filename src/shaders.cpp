@@ -470,6 +470,8 @@ void ShaderProgram::link() {
     state.shaderStages.clear();
     state.bindings.clear();
     state.bindingsByName.clear();
+    state.uniformsByName.clear();
+    state.uniformBlocks.clear();
     state.linked = false;
     state.log.clear();
 
@@ -547,7 +549,7 @@ void ShaderProgram::link() {
     for (const auto &shader : attachedShaders) {
         auto &shaderState = vulkan::shaderState(shader.get());
 
-        auto reflected = vulkan::reflectShaderBindings(shaderState);
+        auto reflected = vulkan::reflectShaderBindings(shaderState, state);
 
         for (auto binding : reflected) {
             binding.stages = shaderState.stage;

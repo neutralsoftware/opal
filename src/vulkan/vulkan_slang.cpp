@@ -131,7 +131,8 @@ std::vector<uint32_t> compileSlangToSPIRV(const std::string &source,
     return spirvData;
 }
 
-std::vector<ShaderBinding> reflectShaderBindings(ShaderState &state) {
+std::vector<ShaderBinding> reflectShaderBindings(ShaderState &state,
+                                                 ProgramState &programState) {
     if (state.spirv.empty()) {
         throw std::runtime_error(
             "Cannot reflect bindings from empty SPIR-V");
@@ -232,6 +233,83 @@ std::vector<ShaderBinding> reflectShaderBindings(ShaderState &state) {
     addResources(resources.separate_images, ShaderResourceType::SampledImage);
     addResources(resources.separate_samplers, ShaderResourceType::Sampler);
     addResources(resources.storage_images, ShaderResourceType::StorageImage);
+
+    for (const auto &resource : resources.uniform_buffers) {
+        uint32_t set = compiler.has_decoration(
+                           resource.id, spv::DecorationDescriptorSet)
+                           ? compiler.get_decoration(
+                                 resource.id, spv::DecorationDescriptorSet)
+                           : 0;
+        uint32_t binding =
+            compiler.get_decoration(resource.id, spv::DecorationBinding);
+        const auto &blockType = compiler.get_type(resource.base_type_id);
+
+        UniformBlockReflection block{};
+        block.name = resourceName(resource);
+        block.set = set;
+        block.binding = binding;
+        block.size = compiler.get_declared_struct_size(blockType);
+        block.members.reserve(blockType.member_types.size());
+
+        for (uint32_t index = 0; index < blockType.member_types.size();
+             ++index) {
+            UniformMember member{};
+            member.name = compiler.get_member_name(resource.base_type_id,
+                                                   index);
+            if (member.name.empty()) {
+                member.name = block.name + "." + std::to_string(index);
+            }
+            member.set = set;
+            member.binding = binding;
+            member.offset = compiler.type_struct_member_offset(blockType,
+                                                               index);
+            member.size = compiler.get_declared_struct_member_size(blockType,
+                                                                   index);
+            block.members.push_back(member);
+
+            auto existingMember = programState.uniformsByName.find(member.name);
+            if (existingMember == programState.uniformsByName.end()) {
+                programState.uniformsByName.emplace(member.name, member);
+            } else if (existingMember->second.set != member.set ||
+                       existingMember->second.binding != member.binding ||
+                       existingMember->second.offset != member.offset ||
+                       existingMember->second.size != member.size) {
+                throw std::runtime_error(
+                    "Conflicting Vulkan uniforms use the name: " +
+                    member.name);
+            }
+        }
+
+        auto existingBlock = std::find_if(
+            programState.uniformBlocks.begin(),
+            programState.uniformBlocks.end(),
+            [&](const UniformBlockReflection &other) {
+                return other.set == block.set &&
+                       other.binding == block.binding;
+            });
+        if (existingBlock == programState.uniformBlocks.end()) {
+            programState.uniformBlocks.push_back(std::move(block));
+            continue;
+        }
+        if (existingBlock->size != block.size ||
+            existingBlock->members.size() != block.members.size()) {
+            throw std::runtime_error(
+                "Vulkan uniform block layout mismatch at descriptor set " +
+                std::to_string(block.set) + " binding " +
+                std::to_string(block.binding));
+        }
+        for (size_t index = 0; index < block.members.size(); ++index) {
+            if (existingBlock->members[index].offset !=
+                    block.members[index].offset ||
+                existingBlock->members[index].size !=
+                    block.members[index].size) {
+                throw std::runtime_error(
+                    "Vulkan uniform block layout mismatch at descriptor set " +
+                    std::to_string(block.set) + " binding " +
+                    std::to_string(block.binding));
+            }
+        }
+    }
 
     if (!resources.subpass_inputs.empty()) {
         throw std::runtime_error(

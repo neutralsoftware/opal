@@ -187,12 +187,36 @@ struct ShaderBinding {
     VkShaderStageFlags stages = 0;
 };
 
+struct UniformMember {
+    std::string name;
+
+    uint32_t set = 0;
+    uint32_t binding = 0;
+
+    size_t offset = 0;
+    size_t size = 0;
+};
+
+struct UniformBlockReflection {
+    std::string name;
+
+    uint32_t set = 0;
+    uint32_t binding = 0;
+
+    size_t size = 0;
+
+    std::vector<UniformMember> members;
+};
+
 struct ProgramState {
     std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
 
     std::vector<ShaderBinding> bindings;
 
     std::unordered_map<std::string, ShaderBinding> bindingsByName;
+
+    std::unordered_map<std::string, UniformMember> uniformsByName;
+    std::vector<UniformBlockReflection> uniformBlocks;
 
     std::vector<VkDescriptorSetLayout> descriptorSetLayouts;
 
@@ -341,8 +365,27 @@ std::vector<uint32_t> compileSlangToSPIRV(const std::string &source,
                                           ShaderType type,
                                           const std::string &entryPoint);
 
-std::vector<ShaderBinding> reflectShaderBindings(ShaderState &state);
+std::vector<ShaderBinding> reflectShaderBindings(ShaderState &state,
+                                                 ProgramState &programState);
 VkDescriptorType descriptorTypeToVk(ShaderResourceType type);
+
+inline uint64_t bindingKey(uint32_t set, uint32_t binding) {
+    return (uint64_t(set) << 32) | binding;
+}
+
+VkBlendFactor blenderFuncToVk(BlendFunc func);
+VkBlendOp blenderOpToVk(BlendEquation op);
+
+VkCompareOp compareOpToVk(CompareOp op);
+VkPrimitiveTopology primitiveStyleToVk(PrimitiveStyle style);
+VkPolygonMode rasterizerModeToVk(RasterizerMode mode);
+VkCullModeFlags cullModeToVk(CullMode mode);
+VkFrontFace frontFaceToVk(FrontFace face);
+
+VkFormat vertexAttributeFormatToVk(VertexAttributeType type, uint size,
+                                   bool normalized);
+
+VkVertexInputRate vertexBindingRateToVk(VertexBindingInputRate rate);
 
 } // namespace opal::vulkan
 
