@@ -332,12 +332,6 @@ void createPools(DeviceState &deviceState) {
     VULKAN_GUARD(vkCreateCommandPool(deviceState.device, &poolInfo, nullptr,
                                      &deviceState.computePool),
                  "Failed to create compute command pool");
-
-    poolInfo.queueFamilyIndex =
-        deviceState.physicalDeviceInfo.queueFamilies.presentQueueFamilyIndex;
-    VULKAN_GUARD(vkCreateCommandPool(deviceState.device, &poolInfo, nullptr,
-                                     &deviceState.presentPool),
-                 "Failed to create present command pool");
 }
 
 } // namespace opal::vulkan

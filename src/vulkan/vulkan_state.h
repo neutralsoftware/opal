@@ -10,6 +10,8 @@
 #ifndef VULKAN_STATE_H
 #define VULKAN_STATE_H
 
+#include <cwchar>
+#include <vector>
 #ifdef VULKAN
 
 #include "opal/opal.h"
@@ -28,6 +30,19 @@ namespace opal::vulkan {
 struct ContextState {
     VkInstance instance = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
+
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
+    VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+
+    VkFormat swapchainImageFormat = VK_FORMAT_UNDEFINED;
+    VkColorSpaceKHR swapchainColorSpace{};
+    VkPresentModeKHR swapchainPresentMode{};
+    VkExtent2D swapchainExtent{};
+
+    std::vector<VkImage> swapchainImages;
+    std::vector<VkImageView> swapchainImageViews;
+
+    uint32_t currentSwapchainImageIndex = UINT32_MAX;
 };
 
 struct DeviceQueueFamilies {
@@ -62,9 +77,6 @@ struct DeviceState {
 
     VkCommandPool graphicsPool = VK_NULL_HANDLE;
     VkCommandPool computePool = VK_NULL_HANDLE;
-    VkCommandPool presentPool = VK_NULL_HANDLE;
-
-    VkSurfaceKHR surface = VK_NULL_HANDLE;
 };
 
 ContextState &contextState(Context *context);
@@ -90,6 +102,11 @@ DeviceQueueFamilies findQueueFamilies(VkPhysicalDevice device,
                                       VkSurfaceKHR surface);
 void createQueues(DeviceState &deviceState);
 void createPools(DeviceState &deviceState);
+
+void createSwapchain(ContextState &contextState, DeviceState &deviceState,
+                     uint32_t width, uint32_t height);
+void createSwapchainImages(ContextState &contextState,
+                           DeviceState &deviceState);
 } // namespace opal::vulkan
 
 #endif

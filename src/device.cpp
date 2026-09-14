@@ -482,19 +482,27 @@ Device::acquire([[maybe_unused]] const std::shared_ptr<Context> &context) {
 
     auto &vulkanState = vulkan::deviceState(device.get());
     auto window = context->getWindow();
-    const auto &vulkanContextState = vulkan::contextState(context.get());
+    auto &vulkanContextState = vulkan::contextState(context.get());
     if (!SDL_Vulkan_CreateSurface(window, vulkanContextState.instance, nullptr,
-                                  &vulkanState.surface)) {
+                                  &vulkanContextState.surface)) {
         throw std::runtime_error("Failed to create Vulkan surface");
     }
 
     vulkanState.physicalDeviceInfo = vulkan::buildQueuesAndPhysicalDevice(
-        vulkanContextState.instance, vulkanState.surface);
+        vulkanContextState.instance, vulkanContextState.surface);
     vulkanState.device =
         vulkan::createLogicalDevice(vulkanState.physicalDeviceInfo);
     vulkan::createQueues(vulkanState);
     vulkan::createPools(vulkanState);
 
+    int width = 0;
+    int height = 0;
+
+    SDL_GetWindowSizeInPixels(window, &width, &height);
+
+    vulkan::createSwapchain(vulkanContextState, vulkanState, width, height);
+
+    vulkan::createSwapchainImages(vulkanContextState, vulkanState);
     return device;
 #else
     throw std::runtime_error("No rendering backend selected");

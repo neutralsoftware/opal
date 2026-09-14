@@ -13,9 +13,9 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <glad/glad.h>
 #include <memory>
 #include <opal/opal.h>
-#include <glad/glad.h>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -890,8 +890,7 @@ void bindComputeTextures(const std::shared_ptr<Pipeline> &pipeline,
                 continue;
             }
             auto &textureState = metal::textureState(texture.get());
-            encoder->useResource(textureState.texture,
-                                 MTL::ResourceUsageRead);
+            encoder->useResource(textureState.texture, MTL::ResourceUsageRead);
         }
     }
     std::array<MTL::Texture *, 64> desiredTextures{};
@@ -1181,7 +1180,8 @@ void CommandBuffer::start() {
                     ? error->localizedDescription()->utf8String()
                     : "Unknown Metal command buffer error";
             detail::log(LogLevel::Error,
-                        std::string("Metal GPU command failed: ") + description);
+                        std::string("Metal GPU command failed: ") +
+                            description);
         }
         buffer->release();
         state.inFlightCommandBuffers.erase(
@@ -1198,7 +1198,8 @@ void CommandBuffer::start() {
                     ? error->localizedDescription()->utf8String()
                     : "Unknown Metal command buffer error";
             detail::log(LogLevel::Error,
-                        std::string("Metal GPU command failed: ") + description);
+                        std::string("Metal GPU command failed: ") +
+                            description);
         }
         oldest->release();
         state.inFlightCommandBuffers.erase(
@@ -1476,7 +1477,8 @@ void CommandBuffer::waitForSubmittedWork() {
                     ? error->localizedDescription()->utf8String()
                     : "Unknown Metal command buffer error";
             detail::log(LogLevel::Error,
-                        std::string("Metal GPU command failed: ") + description);
+                        std::string("Metal GPU command failed: ") +
+                            description);
         }
         submitted->release();
     }
@@ -1864,7 +1866,6 @@ bool CommandBuffer::performSpatialUpscale(
     return false;
 #endif
 }
-
 
 void CommandBuffer::clearColor(float r, float g, float b, float a) {
 #ifdef OPENGL
