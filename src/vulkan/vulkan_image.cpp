@@ -149,6 +149,108 @@ void createSwapchainImages(ContextState &contextState,
     }
 }
 
+VkFormat textureFormatToVkFormat(TextureFormat format) {
+    switch (format) {
+    case opal::TextureFormat::Red8:
+        return VK_FORMAT_R8_UNORM;
+    case opal::TextureFormat::Red16F:
+        return VK_FORMAT_R16_SFLOAT;
+    case opal::TextureFormat::Depth24Stencil8:
+        return VK_FORMAT_D24_UNORM_S8_UINT;
+    case opal::TextureFormat::Depth32F:
+        return VK_FORMAT_D32_SFLOAT;
+    case opal::TextureFormat::Rgba8:
+        return VK_FORMAT_R8G8B8A8_UNORM;
+    case opal::TextureFormat::Rgba16F:
+        return VK_FORMAT_R16G16B16A16_SFLOAT;
+    case opal::TextureFormat::Rgb8:
+        return VK_FORMAT_R8G8B8_UNORM;
+    case opal::TextureFormat::Rgb16F:
+        return VK_FORMAT_R16G16B16_SFLOAT;
+    case opal::TextureFormat::sRgb8:
+        return VK_FORMAT_R8G8B8_SRGB;
+    case opal::TextureFormat::sRgba8:
+        return VK_FORMAT_R8G8B8A8_SRGB;
+    case opal::TextureFormat::DepthComponent24:
+        return VK_FORMAT_X8_D24_UNORM_PACK32;
+    default:
+        throw std::runtime_error("Unsupported texture format for Vulkan");
+    }
+}
+
+VkImageType textureTypeToVk(TextureType type) {
+    switch (type) {
+    case TextureType::Texture2D:
+        return VK_IMAGE_TYPE_2D;
+    case TextureType::Texture2DArray:
+        return VK_IMAGE_TYPE_2D;
+    case TextureType::Texture2DMultisample:
+        return VK_IMAGE_TYPE_2D;
+    case TextureType::Texture3D:
+        return VK_IMAGE_TYPE_3D;
+    case TextureType::TextureCubeMap:
+        return VK_IMAGE_TYPE_2D;
+    default:
+        throw std::runtime_error("Unsupported texture type for Vulkan");
+    }
+}
+
+VkImageAspectFlags textureAspectFlagsFor(TextureFormat format) {
+    switch (format) {
+    case opal::TextureFormat::Depth24Stencil8:
+        return VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+    case opal::TextureFormat::Depth32F:
+        return VK_IMAGE_ASPECT_DEPTH_BIT;
+    case opal::TextureFormat::DepthComponent24:
+        return VK_IMAGE_ASPECT_DEPTH_BIT;
+    default:
+        return VK_IMAGE_ASPECT_COLOR_BIT;
+    }
+}
+
+VkImageUsageFlags textureUsageFlagsFor(TextureType type, TextureFormat format) {
+    switch (format) {
+    case opal::TextureFormat::Depth24Stencil8:
+    case opal::TextureFormat::Depth32F:
+    case opal::TextureFormat::DepthComponent24:
+        return VK_IMAGE_USAGE_SAMPLED_BIT |
+               VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+               VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+               VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    default: {
+        VkImageUsageFlags flags = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                  VK_IMAGE_USAGE_SAMPLED_BIT |
+                                  VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        if (type != TextureType::Texture2DMultisample) {
+            flags |= VK_IMAGE_USAGE_STORAGE_BIT;
+        }
+        return flags;
+    }
+    }
+}
+
+VkSampleCountFlagBits sampleCountFlagBitsFor(int samples) {
+    switch (samples) {
+    case 1:
+        return VK_SAMPLE_COUNT_1_BIT;
+    case 2:
+        return VK_SAMPLE_COUNT_2_BIT;
+    case 4:
+        return VK_SAMPLE_COUNT_4_BIT;
+    case 8:
+        return VK_SAMPLE_COUNT_8_BIT;
+    case 16:
+        return VK_SAMPLE_COUNT_16_BIT;
+    case 32:
+        return VK_SAMPLE_COUNT_32_BIT;
+    case 64:
+        return VK_SAMPLE_COUNT_64_BIT;
+    default:
+        throw std::runtime_error("Unsupported sample count for Vulkan");
+    }
+}
+
 } // namespace opal::vulkan
 
 #endif

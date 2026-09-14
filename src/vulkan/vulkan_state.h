@@ -96,13 +96,59 @@ struct CommandBufferState {
     uint32_t imageIndex = UINT32_MAX;
 };
 
+struct FramebufferState {
+    bool dirty = false;
+};
+
+struct TextureState {
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkImageView imageView = VK_NULL_HANDLE;
+    VkSampler sampler = VK_NULL_HANDLE;
+
+    VkFormat format = VK_FORMAT_UNDEFINED;
+
+    VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VkImageAspectFlags aspectMask = 0;
+
+    VkSampleCountFlagBits sampleCount = VK_SAMPLE_COUNT_1_BIT;
+
+    TextureType type = TextureType::Texture2D;
+    TextureDataFormat dataFormat = TextureDataFormat::Rgba;
+    TextureFormat opalFormat = TextureFormat::Rgba8;
+
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t depth = 1;
+
+    uint32_t mipLevels = 1;
+    uint32_t arrayLayers = 1;
+    uint32_t handle = 0;
+
+    TextureWrapMode wrapS = TextureWrapMode::Repeat;
+    TextureWrapMode wrapT = TextureWrapMode::Repeat;
+    TextureWrapMode wrapR = TextureWrapMode::Repeat;
+    TextureFilterMode minFilter = TextureFilterMode::Linear;
+    TextureFilterMode magFilter = TextureFilterMode::Linear;
+    glm::vec4 borderColor = glm::vec4(0.0f);
+
+    bool ownsImage = false;
+};
+
 ContextState &contextState(Context *context);
 DeviceState &deviceState(Device *device);
 CommandBufferState &commandBufferState(CommandBuffer *commandBuffer);
+FramebufferState &framebufferState(Framebuffer *framebuffer);
+TextureState &textureState(Texture *texture);
+uint32_t registerTextureHandle(const std::shared_ptr<Texture> &texture);
+std::shared_ptr<Texture> getTextureFromHandle(uint32_t handle);
 
 void releaseContextState(Context *context);
 void releaseDeviceState(Device *device);
 void releaseCommandBufferState(CommandBuffer *commandBuffer);
+void releaseFramebufferState(Framebuffer *framebuffer);
+void releaseTextureState(Texture *texture);
 
 bool checkValidationLayerSupport();
 VKAPI_ATTR VkBool32 VKAPI_CALL vulkanDebugCallback(
@@ -121,11 +167,26 @@ DeviceQueueFamilies findQueueFamilies(VkPhysicalDevice device,
                                       VkSurfaceKHR surface);
 void createQueues(DeviceState &deviceState);
 void createPools(DeviceState &deviceState);
+VkCommandBuffer beginSingleTimeCommands(DeviceState &deviceState);
+void endSingleTimeCommands(DeviceState &deviceState,
+                           VkCommandBuffer commandBuffer);
 
 void createSwapchain(ContextState &contextState, DeviceState &deviceState,
                      uint32_t width, uint32_t height);
 void createSwapchainImages(ContextState &contextState,
                            DeviceState &deviceState);
+
+VkFormat textureFormatToVkFormat(TextureFormat format);
+VkImageType textureTypeToVk(TextureType type);
+VkImageAspectFlags textureAspectFlagsFor(TextureFormat format);
+VkImageUsageFlags textureUsageFlagsFor(TextureType type, TextureFormat format);
+VkSampleCountFlagBits sampleCountFlagBitsFor(int samples);
+
+uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter,
+                        VkMemoryPropertyFlags properties);
+
+size_t bytesPerPixel(TextureFormat format);
+
 } // namespace opal::vulkan
 
 #endif
