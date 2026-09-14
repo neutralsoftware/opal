@@ -126,6 +126,8 @@ void createSwapchainImages(ContextState &contextState,
                             contextState.swapchainImages.data());
 
     contextState.swapchainImageViews.resize(swapchainImageCount);
+    contextState.swapchainImageLayouts.resize(swapchainImageCount,
+                                              VK_IMAGE_LAYOUT_UNDEFINED);
 
     for (size_t i = 0; i < swapchainImageCount; i++) {
         VkImageViewCreateInfo viewInfo{};
@@ -142,6 +144,8 @@ void createSwapchainImages(ContextState &contextState,
         viewInfo.subresourceRange.levelCount = 1;
         viewInfo.subresourceRange.baseArrayLayer = 0;
         viewInfo.subresourceRange.layerCount = 1;
+
+        contextState.swapchainImageLayouts[i] = VK_IMAGE_LAYOUT_UNDEFINED;
 
         VULKAN_GUARD(vkCreateImageView(deviceState.device, &viewInfo, nullptr,
                                        &contextState.swapchainImageViews[i]),
@@ -218,10 +222,9 @@ VkImageUsageFlags textureUsageFlagsFor(TextureType type, TextureFormat format) {
                VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     default: {
-        VkImageUsageFlags flags = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                                  VK_IMAGE_USAGE_SAMPLED_BIT |
-                                  VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        VkImageUsageFlags flags =
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         if (type != TextureType::Texture2DMultisample) {
             flags |= VK_IMAGE_USAGE_STORAGE_BIT;
         }

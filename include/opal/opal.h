@@ -132,14 +132,12 @@ class Context {
     bool highPixelDensity = true;
     bool hidden = false;
     int samples = 0;
-
 };
 
 class CommandBuffer;
 class Framebuffer;
 class Buffer;
 class Texture;
-
 
 struct DeviceInfo {
     /** @brief GPU/adapter name reported by the backend. */
@@ -205,7 +203,6 @@ class Device {
     long frameCount = 0;
     std::shared_ptr<Context> context = nullptr;
     static Device *globalInstance;
-
 };
 
 enum class TextureType {
@@ -334,7 +331,6 @@ class Texture {
     uint mipLevels = 1;
     int samples = 1; // For multisampled textures
 
-
   private:
     friend class Pipeline;
     friend class CommandBuffer;
@@ -342,7 +338,6 @@ class Texture {
 
     uint glType = 0;
     uint glFormat = 0;
-
 };
 
 enum class ShaderType {
@@ -353,7 +348,6 @@ enum class ShaderType {
     TessellationEvaluation,
     Compute
 };
-
 
 class Shader {
   public:
@@ -375,7 +369,6 @@ class Shader {
 
     char *source = nullptr;
     std::string functionName;
-
 
 #if defined(METAL)
     static int currentId;
@@ -402,7 +395,6 @@ class ShaderProgram {
     uint programID;
     std::vector<std::shared_ptr<Shader>> attachedShaders;
     bool isComputeProgram() const { return computeProgram; }
-
 
 #if defined(METAL)
     static int currentId;
@@ -614,7 +606,6 @@ class Pipeline {
                           uint32_t bufferIndex);
 #endif
 
-
     bool multisamplingEnabled = false;
 
   private:
@@ -700,7 +691,6 @@ class Buffer {
 
     BufferUsage usage;
     MemoryUsageType memoryUsage;
-
 };
 
 struct VertexAttributeBinding {
@@ -831,12 +821,12 @@ class Framebuffer {
     std::vector<Attachment> attachments;
     bool isDefaultFramebuffer = false;
 
-
   private:
     bool colorBufferDisabled = false;
     int drawBufferCount = -1;
-};
 
+    friend class CommandBuffer;
+};
 
 class RenderPass {
   public:
@@ -845,7 +835,6 @@ class RenderPass {
     void setFramebuffer(std::shared_ptr<Framebuffer> framebuffer);
 
     std::shared_ptr<Framebuffer> framebuffer;
-
 };
 
 class ResolveAction {
@@ -1013,7 +1002,6 @@ class CommandBuffer {
 #endif
 
   private:
-
     float clearColorValue[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     float clearDepthValue = 1.0f;
 
@@ -1028,7 +1016,6 @@ class CommandBuffer {
     std::shared_ptr<Framebuffer> framebuffer = nullptr;
     Device *device = nullptr;
 };
-
 
 } // namespace opal
 

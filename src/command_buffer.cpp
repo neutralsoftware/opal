@@ -19,6 +19,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 #ifdef METAL
 #include "metal_state.h"
 #ifdef __APPLE__
@@ -1454,72 +1455,358 @@ void CommandBuffer::beginPass(std::shared_ptr<RenderPass> newRenderPass) {
     state.clearColorPending = false;
     state.clearDepthPending = false;
 #elif VULKAN
-    // Simplistic implementation without framebuffers yet
     auto &state = vulkan::commandBufferState(this);
     const auto &deviceState = vulkan::deviceState(device);
-    const auto &contextState = vulkan::contextState(device->context.get());
+    auto &contextState = vulkan::contextState(device->context.get());
 
     if (!state.recording) {
         throw std::runtime_error(
             "Vulkan command buffer is not recording before beginPass");
     }
 
-    VkImage image = contextState.swapchainImages[state.imageIndex];
-    VkImageView view = contextState.swapchainImageViews[state.imageIndex];
+    if (state.rendering) {
+        endPass();
+    }
 
-    VkImageMemoryBarrier2 barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    auto transitionImage =
+        [&](vulkan::TextureState &textureState, VkImageLayout newLayout,
+            VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess) {
+            if (textureState.layout == newLayout) {
+                return;
+            }
 
-    barrier.srcStageMask = VK_IMAGE_LAYOUT_UNDEFINED;
-    barrier.srcAccessMask = 0;
+            VkImageMemoryBarrier2 barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
 
-    barrier.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-    barrier.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+            if (textureState.layout == VK_IMAGE_LAYOUT_UNDEFINED) {
+                barrier.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+                barrier.srcAccessMask = 0;
+            } else {
+                barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
 
-    barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                barrier.srcAccessMask =
+                    VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+            }
 
-    barrier.image = image;
+            barrier.dstStageMask = dstStage;
+            barrier.dstAccessMask = dstAccess;
 
-    barrier.subresourceRange.baseMipLevel = 0;
-    barrier.subresourceRange.levelCount = 1;
+            barrier.oldLayout = textureState.layout;
 
-    barrier.subresourceRange.baseArrayLayer = 0;
-    barrier.subresourceRange.layerCount = 1;
+            barrier.newLayout = newLayout;
 
-    VkDependencyInfo dependencyInfo{};
-    dependencyInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            barrier.image = textureState.image;
 
-    dependencyInfo.imageMemoryBarrierCount = 1;
-    dependencyInfo.pImageMemoryBarriers = &barrier;
+            barrier.subresourceRange.aspectMask = textureState.aspectMask;
 
-    vkCmdPipelineBarrier2(state.commandBuffer, &dependencyInfo);
+            barrier.subresourceRange.baseMipLevel = 0;
 
-    VkRenderingAttachmentInfo colorAttachment{};
-    colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    colorAttachment.imageView = view;
-    colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    colorAttachment.loadOp = state.clearColorPending
-                                 ? VK_ATTACHMENT_LOAD_OP_CLEAR
-                                 : VK_ATTACHMENT_LOAD_OP_LOAD;
-    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    colorAttachment.clearValue.color = {clearColorValue[0], clearColorValue[1],
-                                        clearColorValue[2], clearColorValue[3]};
+            barrier.subresourceRange.levelCount = textureState.mipLevels;
 
-    VkRenderingInfo renderingInfo{};
-    renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-    renderingInfo.renderArea.offset = {0, 0};
-    renderingInfo.renderArea.extent = {
-        static_cast<uint32_t>(framebuffer->width),
-        static_cast<uint32_t>(framebuffer->height)};
-    renderingInfo.layerCount = 1;
-    renderingInfo.colorAttachmentCount = 1;
-    renderingInfo.pColorAttachments = &colorAttachment;
+            barrier.subresourceRange.baseArrayLayer = 0;
 
-    vkCmdBeginRendering(state.commandBuffer, &renderingInfo);
+            barrier.subresourceRange.layerCount = textureState.arrayLayers;
 
-    if (state.clearColorPending) {
-        state.clearColorPending = false;
+            VkDependencyInfo dependency{};
+            dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+
+            dependency.imageMemoryBarrierCount = 1;
+            dependency.pImageMemoryBarriers = &barrier;
+
+            vkCmdPipelineBarrier2(state.commandBuffer, &dependency);
+
+            textureState.layout = newLayout;
+        };
+
+    if (framebuffer->isDefaultFramebuffer) {
+        if (state.imageIndex == UINT32_MAX) {
+            throw std::runtime_error("No Vulkan swapchain image acquired "
+                                     "before default framebuffer pass");
+        }
+
+        framebuffer->width =
+            static_cast<int>(contextState.swapchainExtent.width);
+
+        framebuffer->height =
+            static_cast<int>(contextState.swapchainExtent.height);
+
+        VkImage image = contextState.swapchainImages[state.imageIndex];
+
+        VkImageView imageView =
+            contextState.swapchainImageViews[state.imageIndex];
+
+        VkImageLayout oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        if (state.imageIndex < contextState.swapchainImageLayouts.size()) {
+
+            oldLayout = contextState.swapchainImageLayouts[state.imageIndex];
+        }
+
+        if (oldLayout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+
+            VkImageMemoryBarrier2 barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+
+            if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
+                barrier.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+                barrier.srcAccessMask = 0;
+            } else {
+                barrier.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+                barrier.srcAccessMask = 0;
+            }
+
+            barrier.dstStageMask =
+                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+            barrier.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+                                    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+
+            barrier.oldLayout = oldLayout;
+
+            barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+            barrier.image = image;
+
+            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+
+            barrier.subresourceRange.baseMipLevel = 0;
+            barrier.subresourceRange.levelCount = 1;
+
+            barrier.subresourceRange.baseArrayLayer = 0;
+            barrier.subresourceRange.layerCount = 1;
+
+            VkDependencyInfo dependency{};
+            dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+
+            dependency.imageMemoryBarrierCount = 1;
+            dependency.pImageMemoryBarriers = &barrier;
+
+            vkCmdPipelineBarrier2(state.commandBuffer, &dependency);
+
+            if (state.imageIndex < contextState.swapchainImageLayouts.size()) {
+
+                contextState.swapchainImageLayouts[state.imageIndex] =
+                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            }
+        }
+
+        VkRenderingAttachmentInfo colorAttachment{};
+        colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+
+        colorAttachment.imageView = imageView;
+
+        colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        colorAttachment.loadOp = state.clearColorPending
+                                     ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                                     : VK_ATTACHMENT_LOAD_OP_LOAD;
+
+        colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+        colorAttachment.clearValue.color = {
+            {clearColorValue[0], clearColorValue[1], clearColorValue[2],
+             clearColorValue[3]}};
+
+        VkRenderingInfo renderingInfo{};
+        renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+
+        renderingInfo.renderArea.offset = {0, 0};
+
+        renderingInfo.renderArea.extent = contextState.swapchainExtent;
+
+        renderingInfo.layerCount = 1;
+
+        renderingInfo.colorAttachmentCount = 1;
+        renderingInfo.pColorAttachments = &colorAttachment;
+
+        renderingInfo.pDepthAttachment = nullptr;
+
+        renderingInfo.pStencilAttachment = nullptr;
+
+        vkCmdBeginRendering(state.commandBuffer, &renderingInfo);
+
+        state.needsPresent = true;
+    } else {
+        std::vector<VkRenderingAttachmentInfo> colorAttachments;
+
+        VkRenderingAttachmentInfo depthAttachment{};
+        VkRenderingAttachmentInfo stencilAttachment{};
+
+        bool hasDepth = false;
+        bool hasStencil = false;
+
+        const int drawLimit = framebuffer->getDrawBufferCount();
+
+        int colorIndex = 0;
+
+        for (const auto &attachment : framebuffer->attachments) {
+
+            if (attachment.texture == nullptr) {
+                continue;
+            }
+
+            auto &textureState = vulkan::textureState(attachment.texture.get());
+
+            switch (attachment.type) {
+            case Attachment::Type::Color: {
+                if (framebuffer->colorBufferDisabled) {
+                    ++colorIndex;
+                    continue;
+                }
+
+                if (drawLimit >= 0 && colorIndex >= drawLimit) {
+                    ++colorIndex;
+                    continue;
+                }
+
+                transitionImage(textureState,
+                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+                                    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+
+                VkRenderingAttachmentInfo info{};
+                info.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+
+                info.imageView = textureState.imageView;
+
+                info.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+                info.loadOp = state.clearColorPending
+                                  ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                                  : VK_ATTACHMENT_LOAD_OP_LOAD;
+
+                info.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+                info.clearValue.color = {
+                    {clearColorValue[0], clearColorValue[1], clearColorValue[2],
+                     clearColorValue[3]}};
+
+                colorAttachments.push_back(info);
+
+                ++colorIndex;
+                break;
+            }
+
+            case Attachment::Type::Depth: {
+                transitionImage(
+                    textureState, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                    VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                        VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                    VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+
+                depthAttachment = {};
+                depthAttachment.sType =
+                    VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+
+                depthAttachment.imageView = textureState.imageView;
+
+                depthAttachment.imageLayout =
+                    VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+
+                depthAttachment.loadOp = state.clearDepthPending
+                                             ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                                             : VK_ATTACHMENT_LOAD_OP_LOAD;
+
+                depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+                depthAttachment.clearValue.depthStencil = {clearDepthValue, 0};
+
+                hasDepth = true;
+                break;
+            }
+
+            case Attachment::Type::Stencil: {
+                transitionImage(
+                    textureState, VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL,
+                    VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                        VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                    VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+
+                stencilAttachment = {};
+                stencilAttachment.sType =
+                    VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+
+                stencilAttachment.imageView = textureState.imageView;
+
+                stencilAttachment.imageLayout =
+                    VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL;
+
+                stencilAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+
+                stencilAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+                stencilAttachment.clearValue.depthStencil = {1.0f, 0};
+
+                hasStencil = true;
+                break;
+            }
+
+            case Attachment::Type::DepthStencil: {
+                transitionImage(
+                    textureState,
+                    VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                    VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                        VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                    VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+
+                depthAttachment = {};
+                depthAttachment.sType =
+                    VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+
+                depthAttachment.imageView = textureState.imageView;
+
+                depthAttachment.imageLayout =
+                    VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+                depthAttachment.loadOp = state.clearDepthPending
+                                             ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                                             : VK_ATTACHMENT_LOAD_OP_LOAD;
+
+                depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+                depthAttachment.clearValue.depthStencil = {clearDepthValue, 0};
+
+                stencilAttachment = depthAttachment;
+
+                hasDepth = true;
+                hasStencil = true;
+
+                break;
+            }
+
+            default:
+                break;
+            }
+        }
+
+        VkRenderingInfo renderingInfo{};
+        renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+
+        renderingInfo.renderArea.offset = {0, 0};
+
+        renderingInfo.renderArea.extent = {
+            static_cast<uint32_t>(std::max(framebuffer->width, 1)),
+
+            static_cast<uint32_t>(std::max(framebuffer->height, 1))};
+
+        renderingInfo.layerCount = 1;
+
+        renderingInfo.colorAttachmentCount =
+            static_cast<uint32_t>(colorAttachments.size());
+
+        renderingInfo.pColorAttachments =
+            colorAttachments.empty() ? nullptr : colorAttachments.data();
+
+        renderingInfo.pDepthAttachment = hasDepth ? &depthAttachment : nullptr;
+
+        renderingInfo.pStencilAttachment =
+            hasStencil ? &stencilAttachment : nullptr;
+
+        vkCmdBeginRendering(state.commandBuffer, &renderingInfo);
     }
 
     VkViewport viewport{};
@@ -2219,6 +2506,28 @@ void CommandBuffer::clearDepth(float depth) {
         configureDepthAttachmentForClear(state.passDescriptor, clearDepthValue,
                                          true);
     }
+#elif defined(VULKAN)
+    auto &state = vulkan::commandBufferState(this);
+
+    if (state.rendering) {
+        VkClearAttachment clearAttachment{};
+        clearAttachment.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        clearAttachment.colorAttachment = 0;
+        clearAttachment.clearValue.depthStencil.depth = depth;
+        clearAttachment.clearValue.depthStencil.stencil = 0;
+
+        VkClearRect clearRect{};
+        clearRect.rect.offset = {0, 0};
+        clearRect.rect.extent = {static_cast<uint32_t>(framebuffer->width),
+                                 static_cast<uint32_t>(framebuffer->height)};
+        clearRect.baseArrayLayer = 0;
+        clearRect.layerCount = 1;
+
+        vkCmdClearAttachments(state.commandBuffer, 1, &clearAttachment, 1,
+                              &clearRect);
+    } else {
+        state.clearColorPending = true;
+    }
 #endif
 }
 
@@ -2244,6 +2553,32 @@ void CommandBuffer::clear(float r, float g, float b, float a, float depth) {
                                          clearColorValue, true);
         configureDepthAttachmentForClear(state.passDescriptor, clearDepthValue,
                                          true);
+    }
+#elif defined(VULKAN)
+    auto &state = vulkan::commandBufferState(this);
+
+    if (state.rendering) {
+        VkClearAttachment clearAttachments[2]{};
+
+        clearAttachments[0].aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        clearAttachments[0].colorAttachment = 0;
+        clearAttachments[0].clearValue.color = {{r, g, b, a}};
+        clearAttachments[1].aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        clearAttachments[1].colorAttachment = 1;
+        clearAttachments[1].clearValue.depthStencil.depth = depth;
+        clearAttachments[1].clearValue.depthStencil.stencil = 0;
+
+        VkClearRect clearRect{};
+        clearRect.rect.offset = {0, 0};
+        clearRect.rect.extent = {static_cast<uint32_t>(framebuffer->width),
+                                 static_cast<uint32_t>(framebuffer->height)};
+        clearRect.baseArrayLayer = 0;
+        clearRect.layerCount = 1;
+        vkCmdClearAttachments(state.commandBuffer, 2, clearAttachments, 1,
+                              &clearRect);
+    } else {
+        state.clearColorPending = true;
+        state.clearDepthPending = true;
     }
 #endif
 }

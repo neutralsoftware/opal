@@ -43,6 +43,8 @@ struct ContextState {
     std::vector<VkImageView> swapchainImageViews;
 
     uint32_t currentSwapchainImageIndex = UINT32_MAX;
+
+    std::vector<VkImageLayout> swapchainImageLayouts;
 };
 
 struct DeviceQueueFamilies {
@@ -92,6 +94,7 @@ struct CommandBufferState {
     VkFence inFlightFence = VK_NULL_HANDLE;
 
     bool clearColorPending = false;
+    bool clearDepthPending = false;
 
     uint32_t imageIndex = UINT32_MAX;
 };
