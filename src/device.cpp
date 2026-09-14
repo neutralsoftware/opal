@@ -378,6 +378,21 @@ DeviceInfo Device::getDeviceInfo() {
     info.renderingVersion = "Metal 4.0";
     info.opalVersion = OPAL_VERSION;
     return info;
+#elif VULKAN
+    auto &state = vulkan::deviceState(this);
+    if (state.physicalDeviceInfo.device != VK_NULL_HANDLE) {
+        const VkPhysicalDeviceProperties &props =
+            state.physicalDeviceInfo.properties;
+        info.deviceName = props.deviceName;
+        info.vendorName = std::to_string(props.vendorID);
+        info.driverVersion = std::to_string(props.driverVersion);
+        info.renderingVersion =
+            std::to_string(VK_VERSION_MAJOR(props.apiVersion)) + "." +
+            std::to_string(VK_VERSION_MINOR(props.apiVersion)) + "." +
+            std::to_string(VK_VERSION_PATCH(props.apiVersion));
+        info.opalVersion = OPAL_VERSION;
+        return info;
+    }
 #else
     info.deviceName = "Unknown";
     info.vendorName = "Unknown";
@@ -459,6 +474,27 @@ Device::acquire([[maybe_unused]] const std::shared_ptr<Context> &context) {
     attachMetalLayerToView(targetView, contextState.layer);
 
     detail::log(LogLevel::Info, "Graphics device acquired (Metal)");
+    return device;
+#elif VULKAN
+    auto device = std::make_shared<Device>();
+    Device::globalInstance = device.get();
+    device->context = context;
+
+    auto &vulkanState = vulkan::deviceState(device.get());
+    auto window = context->getWindow();
+    const auto &vulkanContextState = vulkan::contextState(context.get());
+    if (!SDL_Vulkan_CreateSurface(window, vulkanContextState.instance, nullptr,
+                                  &vulkanState.surface)) {
+        throw std::runtime_error("Failed to create Vulkan surface");
+    }
+
+    vulkanState.physicalDeviceInfo = vulkan::buildQueuesAndPhysicalDevice(
+        vulkanContextState.instance, vulkanState.surface);
+    vulkanState.device =
+        vulkan::createLogicalDevice(vulkanState.physicalDeviceInfo);
+    vulkan::createQueues(vulkanState);
+    vulkan::createPools(vulkanState);
+
     return device;
 #else
     throw std::runtime_error("No rendering backend selected");

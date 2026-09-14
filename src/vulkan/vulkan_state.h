@@ -63,6 +63,8 @@ struct DeviceState {
     VkCommandPool graphicsPool = VK_NULL_HANDLE;
     VkCommandPool computePool = VK_NULL_HANDLE;
     VkCommandPool presentPool = VK_NULL_HANDLE;
+
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
 };
 
 ContextState &contextState(Context *context);
