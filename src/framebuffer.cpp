@@ -7,14 +7,18 @@
 // Copyright (c) 2025 maxvdec
 //
 
-#include "opal/opal.h"
-#include <glad/glad.h>
 #include "diagnostics.h"
+#include "opal/opal.h"
 #include <algorithm>
+#include <glad/glad.h>
 #include <memory>
 #include <utility>
 #ifdef METAL
 #include "metal_state.h"
+#endif
+
+#ifdef VULKAN
+#include "vulkan_state.h"
 #endif
 
 namespace opal {
@@ -118,6 +122,9 @@ std::shared_ptr<Framebuffer> Framebuffer::create(int width, int height) {
 
 #ifdef OPENGL
     glGenFramebuffers(1, &framebuffer->framebufferID);
+#elif VULKAN
+    auto &state = vulkan::framebufferState(framebuffer.get());
+    state.dirty = true;
 #endif
 
     return framebuffer;
@@ -131,6 +138,9 @@ std::shared_ptr<Framebuffer> Framebuffer::create() {
 
 #ifdef OPENGL
     glGenFramebuffers(1, &framebuffer->framebufferID);
+#elif VULKAN
+    auto &state = vulkan::framebufferState(framebuffer.get());
+    state.dirty = true;
 #endif
 
     return framebuffer;
@@ -147,6 +157,9 @@ void Framebuffer::attachTexture(const std::shared_ptr<Texture> &texture,
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 #elif defined(METAL)
     upsertColorAttachment(attachments, attachmentIndex, texture);
+#elif defined(VULKAN)
+    upsertColorAttachment(attachments, attachmentIndex, texture);
+    vulkan::framebufferState(this).dirty = true;
 #endif
 }
 
@@ -178,6 +191,9 @@ void Framebuffer::addAttachment(const Attachment &attachment) {
     attachments.push_back(attachment);
 #elif defined(METAL)
     attachments.push_back(attachment);
+#elif defined(VULKAN)
+    attachments.push_back(attachment);
+    vulkan::framebufferState(this).dirty = true;
 #endif
 }
 
@@ -208,6 +224,9 @@ void Framebuffer::attachCubemap(const std::shared_ptr<Texture> &texture,
     attachments.push_back(att);
 #elif defined(METAL)
     upsertAttachmentByType(attachments, attachmentType, texture);
+#elif defined(VULKAN)
+    upsertAttachmentByType(attachments, attachmentType, texture);
+    vulkan::framebufferState(this).dirty = true;
 #endif
 }
 
@@ -236,6 +255,13 @@ void Framebuffer::attachCubemapFace(const std::shared_ptr<Texture> &texture,
 #elif defined(METAL)
     (void)face;
     upsertAttachmentByType(attachments, attachmentType, texture);
+#elif defined(VULKAN)
+    (void)face;
+    upsertAttachmentByType(attachments, attachmentType, texture);
+    auto &state = vulkan::framebufferState(this);
+
+    state.cubemapFace = face;
+    state.dirty = true;
 #endif
 }
 
@@ -248,6 +274,10 @@ void Framebuffer::disableColorBuffer() {
 #elif defined(METAL)
     colorBufferDisabled = true;
     drawBufferCount = 0;
+#elif defined(VULKAN)
+    colorBufferDisabled = true;
+    drawBufferCount = 0;
+    vulkan::framebufferState(this).dirty = true;
 #endif
 }
 
@@ -255,6 +285,9 @@ void Framebuffer::setViewport() {
 #ifdef OPENGL
     glViewport(0, 0, width, height);
 #elif defined(METAL)
+    width = std::max(width, 1);
+    height = std::max(height, 1);
+#elif defined(VULKAN)
     width = std::max(width, 1);
     height = std::max(height, 1);
 #endif
@@ -272,6 +305,17 @@ void Framebuffer::setViewport(int x, int y, int viewWidth, int viewHeight) {
     if (viewHeight > 0) {
         height = viewHeight;
     }
+#elif defined(VULKAN)
+    auto &state = vulkan::framebufferState(this);
+    state.viewportX = x;
+    state.viewportY = y;
+
+    if (viewWidth > 0) {
+        width = viewWidth;
+    }
+    if (viewHeight > 0) {
+        height = viewHeight;
+    }
 #endif
 }
 
@@ -282,6 +326,8 @@ bool Framebuffer::getStatus() const {
     return status == GL_FRAMEBUFFER_COMPLETE;
 #elif defined(METAL)
     (void)this;
+    return true;
+#elif defined(VULKAN)
     return true;
 #else
     return false;
@@ -353,6 +399,8 @@ void Framebuffer::setDrawBuffers(int attachmentCount) {
     glDrawBuffers(attachmentCount, drawBuffers.data());
 #elif defined(METAL)
     (void)attachmentCount;
+#elif defined(VULKAN)
+    vulkan::framebufferState(this).dirty = true;
 #endif
 }
 

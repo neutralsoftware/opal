@@ -98,6 +98,11 @@ struct CommandBufferState {
 
 struct FramebufferState {
     bool dirty = false;
+
+    int viewportX = 0;
+    int viewportY = 0;
+
+    int cubemapFace = -1;
 };
 
 struct TextureState {
