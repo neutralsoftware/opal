@@ -55,8 +55,14 @@ struct PhysicalDeviceInfo {
 struct DeviceState {
     PhysicalDeviceInfo physicalDeviceInfo{};
     VkDevice device = VK_NULL_HANDLE;
+
     VkQueue graphicsQueue = VK_NULL_HANDLE;
-    VkCommandPool commandPool = VK_NULL_HANDLE;
+    VkQueue computeQueue = VK_NULL_HANDLE;
+    VkQueue presentQueue = VK_NULL_HANDLE;
+
+    VkCommandPool graphicsPool = VK_NULL_HANDLE;
+    VkCommandPool computePool = VK_NULL_HANDLE;
+    VkCommandPool presentPool = VK_NULL_HANDLE;
 };
 
 ContextState &contextState(Context *context);
@@ -80,6 +86,8 @@ PhysicalDeviceInfo buildQueuesAndPhysicalDevice(VkInstance instance,
 VkDevice createLogicalDevice(const PhysicalDeviceInfo &physicalDeviceInfo);
 DeviceQueueFamilies findQueueFamilies(VkPhysicalDevice device,
                                       VkSurfaceKHR surface);
+void createQueues(DeviceState &deviceState);
+void createPools(DeviceState &deviceState);
 } // namespace opal::vulkan
 
 #endif

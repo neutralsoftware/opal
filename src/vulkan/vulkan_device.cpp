@@ -299,6 +299,47 @@ VkDevice createLogicalDevice(const PhysicalDeviceInfo &physicalDeviceInfo) {
     return device;
 }
 
+void createQueues(DeviceState &deviceState) {
+    vkGetDeviceQueue(
+        deviceState.device,
+        deviceState.physicalDeviceInfo.queueFamilies.graphicsQueueFamilyIndex,
+        0, &deviceState.graphicsQueue);
+
+    vkGetDeviceQueue(
+        deviceState.device,
+        deviceState.physicalDeviceInfo.queueFamilies.computeQueueFamilyIndex, 0,
+        &deviceState.computeQueue);
+
+    vkGetDeviceQueue(
+        deviceState.device,
+        deviceState.physicalDeviceInfo.queueFamilies.presentQueueFamilyIndex, 0,
+        &deviceState.presentQueue);
+}
+
+void createPools(DeviceState &deviceState) {
+    VkCommandPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+
+    poolInfo.queueFamilyIndex =
+        deviceState.physicalDeviceInfo.queueFamilies.graphicsQueueFamilyIndex;
+    VULKAN_GUARD(vkCreateCommandPool(deviceState.device, &poolInfo, nullptr,
+                                     &deviceState.graphicsPool),
+                 "Failed to create graphics command pool");
+
+    poolInfo.queueFamilyIndex =
+        deviceState.physicalDeviceInfo.queueFamilies.computeQueueFamilyIndex;
+    VULKAN_GUARD(vkCreateCommandPool(deviceState.device, &poolInfo, nullptr,
+                                     &deviceState.computePool),
+                 "Failed to create compute command pool");
+
+    poolInfo.queueFamilyIndex =
+        deviceState.physicalDeviceInfo.queueFamilies.presentQueueFamilyIndex;
+    VULKAN_GUARD(vkCreateCommandPool(deviceState.device, &poolInfo, nullptr,
+                                     &deviceState.presentPool),
+                 "Failed to create present command pool");
+}
+
 } // namespace opal::vulkan
 
 #endif
