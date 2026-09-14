@@ -66,6 +66,22 @@ TextureState &textureState(Texture *texture) {
     return textureStatesStorage()[texture];
 }
 
+ShaderState &shaderState(Shader *shader) {
+    static auto *states = new std::unordered_map<Shader *, ShaderState>();
+    return (*states)[shader];
+}
+
+ProgramState &programState(ShaderProgram *program) {
+    static auto *states =
+        new std::unordered_map<ShaderProgram *, ProgramState>();
+    return (*states)[program];
+}
+
+PipelineState &pipelineState(Pipeline *pipeline) {
+    static auto *states = new std::unordered_map<Pipeline *, PipelineState>();
+    return (*states)[pipeline];
+}
+
 uint32_t registerTextureHandle(const std::shared_ptr<Texture> &texture) {
     static uint32_t nextHandle = 1;
     auto &handles = textureHandlesStorage();
@@ -178,6 +194,61 @@ void releaseTextureState(Texture *texture) {
     states.erase(iterator);
 }
 
+void releaseShaderState(Shader *shader) {
+    if (shader == nullptr) {
+        return;
+    }
+    VkDevice device = VK_NULL_HANDLE;
+    if (Device::globalInstance != nullptr) {
+        device = deviceState(Device::globalInstance).device;
+    }
+    auto &state = shaderState(shader);
+    if (device != VK_NULL_HANDLE && state.shaderModule != VK_NULL_HANDLE) {
+        vkDestroyShaderModule(device, state.shaderModule, nullptr);
+        state.shaderModule = VK_NULL_HANDLE;
+    }
+}
+
+void releaseProgramState(ShaderProgram *program) {
+    if (program == nullptr) {
+        return;
+    }
+    VkDevice device = VK_NULL_HANDLE;
+    if (Device::globalInstance != nullptr) {
+        device = deviceState(Device::globalInstance).device;
+    }
+    auto &state = programState(program);
+    if (device != VK_NULL_HANDLE) {
+        if (state.pipelineLayout != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device, state.pipelineLayout, nullptr);
+            state.pipelineLayout = VK_NULL_HANDLE;
+        }
+    }
+}
+
+void releasePipelineState(Pipeline *pipeline) {
+    if (pipeline == nullptr) {
+        return;
+    }
+    VkDevice device = VK_NULL_HANDLE;
+    if (Device::globalInstance != nullptr) {
+        device = deviceState(Device::globalInstance).device;
+    }
+    auto &state = pipelineState(pipeline);
+    if (device != VK_NULL_HANDLE) {
+        for (auto &pair : state.graphicsPipelines) {
+            if (pair.second != VK_NULL_HANDLE) {
+                vkDestroyPipeline(device, pair.second, nullptr);
+            }
+        }
+        state.graphicsPipelines.clear();
+        if (state.computePipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, state.computePipeline, nullptr);
+            state.computePipeline = VK_NULL_HANDLE;
+        }
+    }
+}
+
 VkCommandBuffer beginSingleTimeCommands(DeviceState &deviceState) {
     if (deviceState.device == VK_NULL_HANDLE ||
         deviceState.graphicsPool == VK_NULL_HANDLE) {
@@ -203,8 +274,7 @@ VkCommandBuffer beginSingleTimeCommands(DeviceState &deviceState) {
     if (result != VK_SUCCESS) {
         vkFreeCommandBuffers(deviceState.device, deviceState.graphicsPool, 1,
                              &commandBuffer);
-        VULKAN_GUARD(result,
-                     "Failed to begin one-time Vulkan command buffer");
+        VULKAN_GUARD(result, "Failed to begin one-time Vulkan command buffer");
     }
 
     return commandBuffer;
@@ -350,6 +420,25 @@ size_t bytesPerPixel(TextureFormat format) {
     }
 
     throw std::runtime_error("Unsupported texture format");
+}
+
+VkShaderStageFlagBits shaderTypeToVk(ShaderType type) {
+    switch (type) {
+    case ShaderType::Vertex:
+        return VK_SHADER_STAGE_VERTEX_BIT;
+    case ShaderType::Fragment:
+        return VK_SHADER_STAGE_FRAGMENT_BIT;
+    case ShaderType::Geometry:
+        return VK_SHADER_STAGE_GEOMETRY_BIT;
+    case ShaderType::TessellationControl:
+        return VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+    case ShaderType::TessellationEvaluation:
+        return VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+    case ShaderType::Compute:
+        return VK_SHADER_STAGE_COMPUTE_BIT;
+    default:
+        throw std::runtime_error("Unsupported shader type for Vulkan");
+    }
 }
 
 } // namespace opal::vulkan

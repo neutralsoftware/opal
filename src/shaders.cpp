@@ -23,6 +23,9 @@
 #ifdef METAL
 #include "metal_state.h"
 #endif
+#ifdef VULKAN
+#include "vulkan_state.h"
+#endif
 
 namespace opal {
 
@@ -100,7 +103,7 @@ uint Shader::getGLShaderType(ShaderType type) {
 }
 #endif
 
-#if defined(METAL)
+#if defined(METAL) || defined(VULKAN)
 int Shader::currentId = 1;
 int ShaderProgram::currentId = 1;
 #endif
@@ -108,6 +111,8 @@ int ShaderProgram::currentId = 1;
 Shader::~Shader() {
 #ifdef METAL
     metal::releaseShaderState(this);
+#elif VULKAN
+    vulkan::releaseShaderState(this);
 #endif
     if (source != nullptr) {
         std::free(source);
@@ -118,6 +123,8 @@ Shader::~Shader() {
 ShaderProgram::~ShaderProgram() {
 #ifdef METAL
     metal::releaseProgramState(this);
+#elif VULKAN
+    vulkan::releaseProgramState(this);
 #endif
 }
 
@@ -142,6 +149,20 @@ Shader::createFromSource(const char *source, ShaderType type,
     shader->type = type;
     shader->source = strdup(source);
     shader->functionName = entryPoint;
+    return shader;
+#elif defined(VULKAN)
+    auto shader = std::make_shared<Shader>();
+
+    shader->shaderID = 0;
+    shader->type = type;
+    shader->source = strdup(source);
+    shader->functionName = entryPoint;
+
+    auto &state = vulkan::shaderState(shader.get());
+
+    state.stage = vulkan::shaderTypeToVk(type);
+    state.entryPoint = entryPoint.empty() ? "main" : entryPoint;
+
     return shader;
 #else
     throw std::runtime_error("Shader creation not implemented for this API");
@@ -214,6 +235,57 @@ void Shader::compile() {
     }
 
     this->shaderID = Shader::currentId++;
+#elif VULKAN
+    if (Device::globalInstance == nullptr) {
+        throw std::runtime_error("Cannot compile Vulkan shader without device");
+    }
+
+    auto &deviceState = vulkan::deviceState(Device::globalInstance);
+
+    if (deviceState.device == VK_NULL_HANDLE) {
+        throw std::runtime_error("Vulkan device is not initialized");
+    }
+
+    if (source == nullptr) {
+        throw std::runtime_error("Vulkan shader source is null");
+    }
+
+    if (functionName.empty()) {
+        throw std::runtime_error(
+            "Vulkan shader function name must be specified before compilation");
+    }
+
+    auto &state = vulkan::shaderState(this);
+    state.stage = vulkan::shaderTypeToVk(type);
+    state.entryPoint = functionName;
+
+    state.spirv = vulkan::compileSlangToSPIRV(source, type, functionName);
+
+    if (state.spirv.empty()) {
+        throw std::runtime_error(
+            "Vulkan shader compilation produced no SPIR-V");
+    }
+
+    if (state.shaderModule != VK_NULL_HANDLE) {
+        vkDestroyShaderModule(deviceState.device, state.shaderModule, nullptr);
+        state.shaderModule = VK_NULL_HANDLE;
+    }
+
+    VkShaderModuleCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+
+    info.codeSize = state.spirv.size() * sizeof(uint32_t);
+
+    info.pCode = state.spirv.data();
+
+    VULKAN_GUARD(vkCreateShaderModule(deviceState.device, &info, nullptr,
+                                      &state.shaderModule),
+                 "Failed to create Vulkan shader module");
+
+    state.compiled = true;
+
+    shaderID = Shader::currentId++;
+
 #endif
 }
 
@@ -225,6 +297,9 @@ bool Shader::getShaderStatus() const {
 #elif defined(METAL)
     auto &shaderState = metal::shaderState(const_cast<Shader *>(this));
     return shaderState.function != nullptr;
+#elif defined(VULKAN)
+    auto &state = vulkan::shaderState(const_cast<Shader *>(this));
+    return state.compiled && state.shaderModule != VK_NULL_HANDLE;
 #else
     throw std::runtime_error(
         "Shader status retrieval not implemented for this API");
@@ -255,6 +330,10 @@ std::shared_ptr<ShaderProgram> ShaderProgram::create() {
     auto program = std::make_shared<ShaderProgram>();
     program->attachedShaders = {};
     return program;
+#elif defined(VULKAN)
+    auto program = std::make_shared<ShaderProgram>();
+    program->attachedShaders = {};
+    return program;
 #else
     throw std::runtime_error(
         "Shader program creation not implemented for this API");
@@ -272,6 +351,16 @@ void ShaderProgram::attachShader(const std::shared_ptr<Shader> &shader,
 
     (void)callerId;
 #elif defined(METAL)
+    attachedShaders.push_back(shader);
+    detail::emit(ResourceEvent{
+        std::to_string(callerId), ResourceType::Shader,
+        ResourceOperation::Loaded,
+        Device::globalInstance
+            ? static_cast<unsigned int>(Device::globalInstance->frameCount)
+            : 0,
+        static_cast<float>(shader->source ? strlen(shader->source) : 0) /
+            (1024.0f * 1024.0f)});
+#elif defined(VULKAN)
     attachedShaders.push_back(shader);
     detail::emit(ResourceEvent{
         std::to_string(callerId), ResourceType::Shader,
@@ -354,6 +443,187 @@ void ShaderProgram::link() {
     }
 
     this->programID = ShaderProgram::currentId++;
+#elif defined(VULKAN)
+    auto &state = vulkan::programState(this);
+
+    if (Device::globalInstance == nullptr) {
+        throw std::runtime_error(
+            "Cannot link Vulkan shader program without device");
+    }
+
+    auto &deviceState = vulkan::deviceState(Device::globalInstance);
+
+    for (VkDescriptorSetLayout layout : state.descriptorSetLayouts) {
+        if (layout != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(deviceState.device, layout, nullptr);
+        }
+    }
+
+    state.descriptorSetLayouts.clear();
+
+    if (state.pipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(deviceState.device, state.pipelineLayout,
+                                nullptr);
+        state.pipelineLayout = VK_NULL_HANDLE;
+    }
+
+    state.shaderStages.clear();
+    state.bindings.clear();
+    state.bindingsByName.clear();
+    state.linked = false;
+    state.log.clear();
+
+    this->computeProgram = false;
+
+    for (const auto &shader : attachedShaders) {
+        if (shader != nullptr && shader->type == ShaderType::Compute) {
+            this->computeProgram = true;
+            break;
+        }
+    }
+
+    state.computeProgram = this->computeProgram;
+
+    bool hasVertex = false;
+    bool hasFragment = false;
+    bool hasCompute = false;
+
+    for (const auto &shader : attachedShaders) {
+
+        if (shader == nullptr) {
+            continue;
+        }
+
+        auto &shaderState = vulkan::shaderState(shader.get());
+
+        if (!shaderState.compiled ||
+            shaderState.shaderModule == VK_NULL_HANDLE) {
+
+            throw std::runtime_error(
+                "All Vulkan shaders must be compiled before linking");
+        }
+
+        switch (shader->type) {
+        case ShaderType::Vertex:
+            hasVertex = true;
+            break;
+
+        case ShaderType::Fragment:
+            hasFragment = true;
+            break;
+
+        case ShaderType::Compute:
+            hasCompute = true;
+            break;
+
+        default:
+            break;
+        }
+    }
+
+    if (hasCompute) {
+        if (attachedShaders.size() != 1 || !hasCompute) {
+            throw std::runtime_error(
+                "Vulkan compute program must contain only a compute shader");
+        }
+    } else {
+        if (!hasVertex || !hasFragment) {
+            throw std::runtime_error(
+                "Vulkan graphics program requires vertex and fragment shaders");
+        }
+    }
+
+    for (const auto &shader : attachedShaders) {
+        auto &shaderState = vulkan::shaderState(shader.get());
+
+        VkPipelineShaderStageCreateInfo stage{};
+        stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stage.stage = shaderState.stage;
+        stage.module = shaderState.shaderModule;
+        stage.pName = shaderState.entryPoint.c_str();
+        state.shaderStages.push_back(stage);
+    }
+
+    for (const auto &shader : attachedShaders) {
+        auto &shaderState = vulkan::shaderState(shader.get());
+
+        auto reflected = vulkan::reflectShaderBindings(shaderState);
+
+        for (auto binding : reflected) {
+            binding.stages = shaderState.stage;
+            auto existing =
+                std::find_if(state.bindings.begin(), state.bindings.end(),
+                             [&](const vulkan::ShaderBinding &other) {
+                                 return other.set == binding.set &&
+                                        other.binding == binding.binding;
+                             });
+            if (existing != state.bindings.end()) {
+                if (existing->type != binding.type) {
+                    throw std::runtime_error("Vulkan descriptor binding type "
+                                             "mismatch between shader stages");
+                }
+                existing->stages |= binding.stages;
+            } else {
+                state.bindings.push_back(binding);
+            }
+
+            state.bindingsByName[binding.name] = binding;
+        }
+    }
+
+    uint32_t maxSet = 0;
+
+    for (const auto &binding : state.bindings) {
+        maxSet = std::max(maxSet, binding.set);
+    }
+
+    std::vector<std::vector<VkDescriptorSetLayoutBinding>> bindingsPerSet(
+        state.bindings.empty() ? 0 : maxSet + 1);
+
+    for (const auto &binding : state.bindings) {
+        VkDescriptorSetLayoutBinding vkBinding{};
+        vkBinding.binding = binding.binding;
+        vkBinding.descriptorType = vulkan::descriptorTypeToVk(binding.type);
+        vkBinding.descriptorCount = binding.count;
+        vkBinding.stageFlags = binding.stages;
+        vkBinding.pImmutableSamplers = nullptr;
+        bindingsPerSet[binding.set].push_back(vkBinding);
+    }
+
+    state.descriptorSetLayouts.resize(bindingsPerSet.size(), VK_NULL_HANDLE);
+
+    for (size_t set = 0; set < bindingsPerSet.size(); ++set) {
+        auto &setBindings = bindingsPerSet[set];
+
+        VkDescriptorSetLayoutCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        info.bindingCount = static_cast<uint32_t>(setBindings.size());
+        info.pBindings = setBindings.empty() ? nullptr : setBindings.data();
+
+        VULKAN_GUARD(
+            vkCreateDescriptorSetLayout(deviceState.device, &info, nullptr,
+                                        &state.descriptorSetLayouts[set]),
+            "Failed to create Vulkan descriptor set layout");
+    }
+
+    VkPipelineLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutInfo.setLayoutCount =
+        static_cast<uint32_t>(state.descriptorSetLayouts.size());
+    layoutInfo.pSetLayouts = state.descriptorSetLayouts.empty()
+                                 ? nullptr
+                                 : state.descriptorSetLayouts.data();
+    layoutInfo.pushConstantRangeCount = 0;
+    layoutInfo.pPushConstantRanges = nullptr;
+
+    VULKAN_GUARD(vkCreatePipelineLayout(deviceState.device, &layoutInfo,
+                                        nullptr, &state.pipelineLayout),
+                 "Failed to create Vulkan pipeline layout");
+
+    state.linked = true;
+
+    programID = ShaderProgram::currentId++;
+
 #else
     throw std::runtime_error(
         "Shader program linking not implemented for this API");
@@ -371,6 +641,10 @@ bool ShaderProgram::getProgramStatus() const {
         return state.computeFunction != nullptr;
     }
     return state.vertexFunction != nullptr && state.fragmentFunction != nullptr;
+#elif defined(VULKAN)
+    const auto &state = vulkan::programState(const_cast<ShaderProgram *>(this));
+
+    return state.linked && state.pipelineLayout != VK_NULL_HANDLE;
 #else
     throw std::runtime_error(
         "Shader program status retrieval not implemented for this API");
@@ -384,11 +658,20 @@ void ShaderProgram::getProgramLog(char *logBuffer, size_t bufferSize) const {
 #elif defined(METAL)
     strncpy(logBuffer, "Metal program link status available via exceptions.",
             bufferSize);
+#elif defined(VULKAN)
+    const auto &state = vulkan::programState(const_cast<ShaderProgram *>(this));
+
+    if (bufferSize == 0) {
+        return;
+    }
+
+    std::strncpy(logBuffer, state.log.c_str(), bufferSize - 1);
+
+    logBuffer[bufferSize - 1] = '\0';
 #else
     throw std::runtime_error(
         "Shader program log retrieval not implemented for this API");
 #endif
 }
-
 
 } // namespace opal

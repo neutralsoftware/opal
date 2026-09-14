@@ -15,6 +15,8 @@
 #ifdef VULKAN
 
 #include "opal/opal.h"
+#include "slang-com-ptr.h"
+#include <slang.h>
 #include <vulkan/vulkan.h>
 
 #define VULKAN_GUARD(call, message)                                            \
@@ -27,6 +29,14 @@
     } while (false)
 
 namespace opal::vulkan {
+
+struct SlangCompilerState {
+    Slang::ComPtr<slang::IGlobalSession> globalSession;
+    Slang::ComPtr<slang::ISession> session;
+
+    SlangCompilerState();
+};
+
 struct ContextState {
     VkInstance instance = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
@@ -144,11 +154,138 @@ struct TextureState {
     bool ownsImage = false;
 };
 
+struct ShaderState {
+    VkShaderModule shaderModule = VK_NULL_HANDLE;
+    VkShaderStageFlagBits stage{};
+    std::string entryPoint = "main";
+
+    std::vector<uint32_t> spirv;
+
+    bool compiled = false;
+    std::string log;
+};
+
+enum class ShaderResourceType {
+    UniformBuffer,
+    StorageBuffer,
+    CombinedImageSampler,
+    SampledImage,
+    Sampler,
+    StorageImage
+};
+
+struct ShaderBinding {
+    uint32_t set = 0;
+    uint32_t binding = 0;
+
+    std::string name;
+
+    ShaderResourceType type = ShaderResourceType::UniformBuffer;
+
+    uint32_t count = 1;
+
+    VkShaderStageFlags stages = 0;
+};
+
+struct ProgramState {
+    std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
+
+    std::vector<ShaderBinding> bindings;
+
+    std::unordered_map<std::string, ShaderBinding> bindingsByName;
+
+    std::vector<VkDescriptorSetLayout> descriptorSetLayouts;
+
+    VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+
+    bool computeProgram = false;
+
+    uint32_t fragmentColorOutputs = 1;
+
+    bool linked = false;
+
+    std::string log;
+};
+
+struct VulkanUniformLocation {
+    uint32_t set = 0;
+    uint32_t binding = 0;
+
+    uint32_t offset = 0;
+    uint32_t size = 0;
+};
+
+struct VulkanUniformBlock {
+    uint32_t set = 0;
+    uint32_t binding = 0;
+
+    uint32_t size = 0;
+
+    std::vector<uint8_t> data;
+
+    std::vector<std::shared_ptr<Buffer>> buffers;
+
+    bool dirty = false;
+};
+
+struct PipelineRenderTargetKey {
+    std::vector<VkFormat> colorFormats;
+
+    VkFormat depthFormat = VK_FORMAT_UNDEFINED;
+    VkFormat stencilFormat = VK_FORMAT_UNDEFINED;
+
+    VkSampleCountFlagBits sampleCount = VK_SAMPLE_COUNT_1_BIT;
+
+    uint32_t viewMask = 0;
+
+    bool operator==(const PipelineRenderTargetKey &other) const = default;
+};
+
+struct BoundBufferResource {
+    std::shared_ptr<Buffer> buffer;
+
+    VkDeviceSize offset = 0;
+    VkDeviceSize range = VK_WHOLE_SIZE;
+};
+
+struct PipelineState {
+    VkPipeline computePipeline = VK_NULL_HANDLE;
+
+    std::unordered_map<PipelineRenderTargetKey, VkPipeline> graphicsPipelines;
+
+    VkPipelineBindPoint bindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+
+    VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPolygonMode polygonMode = VK_POLYGON_MODE_FILL;
+    VkCullModeFlags cullMode = VK_CULL_MODE_BACK_BIT;
+    VkFrontFace frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    VkCompareOp depthCompare = VK_COMPARE_OP_LESS;
+
+    std::vector<VkVertexInputBindingDescription> vertexBindings;
+    std::vector<VkVertexInputAttributeDescription> vertexAttributes;
+
+    std::unordered_map<std::string, VulkanUniformBlock> uniformsByName;
+    std::unordered_map<uint64_t, VulkanUniformBlock> uniformBlocks;
+    std::unordered_map<uint64_t, BoundBufferResource> boundBuffers;
+
+    std::vector<std::vector<VkDescriptorSet>> descriptorSets;
+
+    bool descriptorsDirty = false;
+    bool pipelineDirty = false;
+
+    bool built = false;
+};
+
+SlangCompilerState &slangCompiler();
 ContextState &contextState(Context *context);
 DeviceState &deviceState(Device *device);
 CommandBufferState &commandBufferState(CommandBuffer *commandBuffer);
 FramebufferState &framebufferState(Framebuffer *framebuffer);
 TextureState &textureState(Texture *texture);
+ShaderState &shaderState(Shader *shader);
+ProgramState &programState(ShaderProgram *program);
+PipelineState &pipelineState(Pipeline *pipeline);
+
 uint32_t registerTextureHandle(const std::shared_ptr<Texture> &texture);
 std::shared_ptr<Texture> getTextureFromHandle(uint32_t handle);
 
@@ -157,6 +294,9 @@ void releaseDeviceState(Device *device);
 void releaseCommandBufferState(CommandBuffer *commandBuffer);
 void releaseFramebufferState(Framebuffer *framebuffer);
 void releaseTextureState(Texture *texture);
+void releaseShaderState(Shader *shader);
+void releaseProgramState(ShaderProgram *program);
+void releasePipelineState(Pipeline *pipeline);
 
 bool checkValidationLayerSupport();
 VKAPI_ATTR VkBool32 VKAPI_CALL vulkanDebugCallback(
@@ -194,6 +334,15 @@ uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter,
                         VkMemoryPropertyFlags properties);
 
 size_t bytesPerPixel(TextureFormat format);
+
+VkShaderStageFlagBits shaderTypeToVk(ShaderType type);
+
+std::vector<uint32_t> compileSlangToSPIRV(const std::string &source,
+                                          ShaderType type,
+                                          const std::string &entryPoint);
+
+std::vector<ShaderBinding> reflectShaderBindings(ShaderState &state);
+VkDescriptorType descriptorTypeToVk(ShaderResourceType type);
 
 } // namespace opal::vulkan
 

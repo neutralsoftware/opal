@@ -370,7 +370,7 @@ class Shader {
     char *source = nullptr;
     std::string functionName;
 
-#if defined(METAL)
+#if defined(METAL) || defined(VULKAN)
     static int currentId;
 #endif
 
@@ -396,7 +396,7 @@ class ShaderProgram {
     std::vector<std::shared_ptr<Shader>> attachedShaders;
     bool isComputeProgram() const { return computeProgram; }
 
-#if defined(METAL)
+#if defined(METAL) || defined(VULKAN)
     static int currentId;
 #endif
 

@@ -124,6 +124,16 @@ elseif(OPAL_RESOLVED_BACKEND STREQUAL "VULKAN")
     find_package(spirv_cross_glsl REQUIRED)
     find_package(spirv_cross_reflect REQUIRED)
 
+    set(SLANG_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+    set(SLANG_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(SLANG_ENABLE_GFX OFF CACHE BOOL "" FORCE)
+
+    add_subdirectory(third-party/slang)
+
+    target_link_libraries(opal PRIVATE
+        slang
+    )
+
     file(GLOB_RECURSE OPAL_VULKAN_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan/*.cpp   )
     target_sources(opal PRIVATE
         ${OPAL_VULKAN_SRCS}
