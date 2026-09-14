@@ -1572,6 +1572,60 @@ void CommandBuffer::endPass() {
     }
     state.textureBindingsInitialized = false;
     state.hasDraw = false;
+#elif VULKAN
+    auto &state = vulkan::commandBufferState(this);
+    const auto &contextState = vulkan::contextState(device->context.get());
+
+    if (!state.recording) {
+        throw std::runtime_error(
+            "Vulkan command buffer is not recording before endPass");
+    }
+
+    if (!state.rendering) {
+        throw std::runtime_error(
+            "Vulkan command buffer is not rendering before endPass");
+    }
+
+    vkCmdEndRendering(state.commandBuffer);
+
+    VkImage image = contextState.swapchainImages[state.imageIndex];
+
+    VkImageMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+    barrier.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_NONE;
+
+    barrier.dstAccessMask = 0;
+
+    barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+    barrier.image = image;
+
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+
+    barrier.subresourceRange.baseMipLevel = 0;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount = 1;
+
+    VkDependencyInfo dependencyInfo{};
+    dependencyInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+
+    dependencyInfo.imageMemoryBarrierCount = 1;
+    dependencyInfo.pImageMemoryBarriers = &barrier;
+
+    vkCmdPipelineBarrier2(state.commandBuffer, &dependencyInfo);
+
+    state.rendering = false;
+
+    renderPass = nullptr;
+    framebuffer = nullptr;
 #endif
 }
 
@@ -1630,6 +1684,78 @@ void CommandBuffer::commit() {
     if (state.autoreleasePool != nullptr) {
         state.autoreleasePool->release();
         state.autoreleasePool = nullptr;
+    }
+#elif VULKAN
+    auto &state = vulkan::commandBufferState(this);
+    const auto &deviceState = vulkan::deviceState(device);
+    const auto &contextState = vulkan::contextState(device->context.get());
+
+    if (!state.recording) {
+        throw std::runtime_error(
+            "Vulkan command buffer is not recording before commit");
+    }
+
+    if (state.rendering) {
+        throw std::runtime_error(
+            "Vulkan command buffer is still rendering before commit");
+    }
+
+    VULKAN_GUARD(vkEndCommandBuffer(state.commandBuffer),
+                 "Failed to end Vulkan command buffer");
+
+    state.recording = false;
+
+    VkSemaphoreSubmitInfo waitSemaphoreInfo{};
+    waitSemaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    waitSemaphoreInfo.semaphore = state.imageAvailableSemaphore;
+    waitSemaphoreInfo.stageMask =
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+    VkCommandBufferSubmitInfo commandInfo{};
+    commandInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+
+    commandInfo.commandBuffer = state.commandBuffer;
+
+    VkSemaphoreSubmitInfo signalInfo{};
+    signalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+
+    signalInfo.semaphore = state.renderFinishedSemaphore;
+
+    signalInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT;
+
+    VkSubmitInfo2 submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+
+    submitInfo.waitSemaphoreInfoCount = 1;
+    submitInfo.pWaitSemaphoreInfos = &waitSemaphoreInfo;
+
+    submitInfo.commandBufferInfoCount = 1;
+    submitInfo.pCommandBufferInfos = &commandInfo;
+
+    submitInfo.signalSemaphoreInfoCount = 1;
+    submitInfo.pSignalSemaphoreInfos = &signalInfo;
+
+    VULKAN_GUARD(vkQueueSubmit2(deviceState.graphicsQueue, 1, &submitInfo,
+                                state.inFlightFence),
+                 "Failed to submit Vulkan command buffer");
+
+    VkPresentInfoKHR presentInfo{};
+    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+
+    presentInfo.waitSemaphoreCount = 1;
+    presentInfo.pWaitSemaphores = &state.renderFinishedSemaphore;
+
+    presentInfo.swapchainCount = 1;
+    presentInfo.pSwapchains = &contextState.swapchain;
+
+    presentInfo.pImageIndices = &state.imageIndex;
+
+    VkResult result = vkQueuePresentKHR(deviceState.presentQueue, &presentInfo);
+
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+
+    } else if (result != VK_SUCCESS) {
+        throw std::runtime_error("Failed to present Vulkan swapchain image");
     }
 #endif
 }
