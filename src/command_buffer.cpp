@@ -27,6 +27,10 @@
 #endif
 #endif
 
+#ifdef VULKAN
+#include "vulkan_state.h"
+#endif
+
 namespace opal {
 
 CommandBuffer::~CommandBuffer() {
@@ -1157,6 +1161,21 @@ std::shared_ptr<CommandBuffer> Device::acquireCommandBuffer() {
     auto commandBuffer = std::make_shared<CommandBuffer>();
     commandBuffer->device = this;
 
+#ifdef VULKAN
+    auto &commandBufferState = vulkan::commandBufferState(commandBuffer.get());
+    auto &deviceState = vulkan::deviceState(this);
+
+    VkCommandBufferAllocateInfo allocateInfo{};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocateInfo.commandPool = deviceState.graphicsPool;
+    allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocateInfo.commandBufferCount = 1;
+
+    VULKAN_GUARD(vkAllocateCommandBuffers(deviceState.device, &allocateInfo,
+                                          &commandBufferState.commandBuffer),
+                 "Failed to allocate command buffer");
+#endif
+
     return commandBuffer;
 }
 
@@ -1227,6 +1246,69 @@ void CommandBuffer::start() {
     state.hasDraw = false;
     state.clearColorPending = false;
     state.clearDepthPending = false;
+#elif VULKAN
+    auto device = this->device;
+    auto &state = vulkan::commandBufferState(this);
+    const auto &deviceState = vulkan::deviceState(device);
+    const auto &contextState = vulkan::contextState(device->context.get());
+
+    if (state.imageAvailableSemaphore == VK_NULL_HANDLE ||
+        state.renderFinishedSemaphore == VK_NULL_HANDLE) {
+        VkSemaphoreCreateInfo semaphoreInfo{};
+        semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        VULKAN_GUARD(vkCreateSemaphore(deviceState.device, &semaphoreInfo,
+                                       nullptr, &state.imageAvailableSemaphore),
+                     "Failed to create Vulkan image available semaphore");
+        VULKAN_GUARD(vkCreateSemaphore(deviceState.device, &semaphoreInfo,
+                                       nullptr, &state.renderFinishedSemaphore),
+                     "Failed to create Vulkan render finished semaphore");
+    }
+
+    if (state.inFlightFence == VK_NULL_HANDLE) {
+        VkFenceCreateInfo fenceInfo{};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+        VULKAN_GUARD(vkCreateFence(deviceState.device, &fenceInfo, nullptr,
+                                   &state.inFlightFence),
+                     "Failed to create Vulkan in-flight fence");
+    }
+
+    if (state.inFlightFence != VK_NULL_HANDLE) {
+        auto &deviceState = vulkan::deviceState(device);
+        vkWaitForFences(deviceState.device, 1, &state.inFlightFence, VK_TRUE,
+                        UINT64_MAX);
+    }
+
+    if (state.commandBuffer == VK_NULL_HANDLE) {
+        throw std::runtime_error(
+            "Vulkan command buffer is not initialized before start");
+    }
+
+    VkResult result = vkAcquireNextImageKHR(
+        deviceState.device, contextState.swapchain, UINT64_MAX,
+        state.imageAvailableSemaphore, VK_NULL_HANDLE, &state.imageIndex);
+
+    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+        return;
+    }
+
+    if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+        throw std::runtime_error("Failed to acquire next Vulkan image");
+    }
+
+    VULKAN_GUARD(vkResetFences(deviceState.device, 1, &state.inFlightFence),
+                 "Failed to reset Vulkan in-flight fence");
+
+    VULKAN_GUARD(vkResetCommandBuffer(state.commandBuffer, 0),
+                 "Failed to reset Vulkan command buffer");
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    VULKAN_GUARD(vkBeginCommandBuffer(state.commandBuffer, &beginInfo),
+                 "Failed to begin Vulkan command buffer");
+
+    state.recording = true;
+
 #endif
 }
 

@@ -79,11 +79,28 @@ struct DeviceState {
     VkCommandPool computePool = VK_NULL_HANDLE;
 };
 
+struct CommandBufferState {
+    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+
+    bool recording = false;
+    bool rendering = false;
+
+    bool needsPresent = false;
+
+    VkSemaphore imageAvailableSemaphore = VK_NULL_HANDLE;
+    VkSemaphore renderFinishedSemaphore = VK_NULL_HANDLE;
+    VkFence inFlightFence = VK_NULL_HANDLE;
+
+    uint32_t imageIndex = UINT32_MAX;
+};
+
 ContextState &contextState(Context *context);
 DeviceState &deviceState(Device *device);
+CommandBufferState &commandBufferState(CommandBuffer *commandBuffer);
 
 void releaseContextState(Context *context);
 void releaseDeviceState(Device *device);
+void releaseCommandBufferState(CommandBuffer *commandBuffer);
 
 bool checkValidationLayerSupport();
 VKAPI_ATTR VkBool32 VKAPI_CALL vulkanDebugCallback(

@@ -26,12 +26,23 @@ std::unordered_map<Device *, DeviceState> &deviceStatesStorage() {
     return *states;
 }
 
+std::unordered_map<CommandBuffer *, CommandBufferState> &
+commandStatesStorage() {
+    static auto *states =
+        new std::unordered_map<CommandBuffer *, CommandBufferState>();
+    return *states;
+}
+
 ContextState &contextState(Context *context) {
     return contextStatesStorage()[context];
 }
 
 DeviceState &deviceState(Device *device) {
     return deviceStatesStorage()[device];
+}
+
+CommandBufferState &commandBufferState(CommandBuffer *commandBuffer) {
+    return commandStatesStorage()[commandBuffer];
 }
 
 void releaseContextState(Context *context) {
@@ -60,6 +71,21 @@ void releaseDeviceState(Device *device) {
     if (it->second.device != VK_NULL_HANDLE) {
         vkDestroyDevice(it->second.device, nullptr);
         it->second.device = VK_NULL_HANDLE;
+    }
+    states.erase(it);
+}
+
+void releaseCommandBufferState(CommandBuffer *commandBuffer) {
+    if (commandBuffer == nullptr) {
+        return;
+    }
+    auto &states = commandStatesStorage();
+    auto it = states.find(commandBuffer);
+    if (it == states.end()) {
+        return;
+    }
+    if (it->second.commandBuffer != VK_NULL_HANDLE) {
+        it->second.commandBuffer = VK_NULL_HANDLE;
     }
     states.erase(it);
 }
