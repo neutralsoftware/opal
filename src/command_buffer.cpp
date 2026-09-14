@@ -1453,6 +1453,93 @@ void CommandBuffer::beginPass(std::shared_ptr<RenderPass> newRenderPass) {
 
     state.clearColorPending = false;
     state.clearDepthPending = false;
+#elif VULKAN
+    // Simplistic implementation without framebuffers yet
+    auto &state = vulkan::commandBufferState(this);
+    const auto &deviceState = vulkan::deviceState(device);
+    const auto &contextState = vulkan::contextState(device->context.get());
+
+    if (!state.recording) {
+        throw std::runtime_error(
+            "Vulkan command buffer is not recording before beginPass");
+    }
+
+    VkImage image = contextState.swapchainImages[state.imageIndex];
+    VkImageView view = contextState.swapchainImageViews[state.imageIndex];
+
+    VkImageMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+
+    barrier.srcStageMask = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.srcAccessMask = 0;
+
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+
+    barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    barrier.image = image;
+
+    barrier.subresourceRange.baseMipLevel = 0;
+    barrier.subresourceRange.levelCount = 1;
+
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount = 1;
+
+    VkDependencyInfo dependencyInfo{};
+    dependencyInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+
+    dependencyInfo.imageMemoryBarrierCount = 1;
+    dependencyInfo.pImageMemoryBarriers = &barrier;
+
+    vkCmdPipelineBarrier2(state.commandBuffer, &dependencyInfo);
+
+    VkRenderingAttachmentInfo colorAttachment{};
+    colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    colorAttachment.imageView = view;
+    colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    colorAttachment.loadOp = state.clearColorPending
+                                 ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                                 : VK_ATTACHMENT_LOAD_OP_LOAD;
+    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    colorAttachment.clearValue.color = {clearColorValue[0], clearColorValue[1],
+                                        clearColorValue[2], clearColorValue[3]};
+
+    VkRenderingInfo renderingInfo{};
+    renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    renderingInfo.renderArea.offset = {0, 0};
+    renderingInfo.renderArea.extent = {
+        static_cast<uint32_t>(framebuffer->width),
+        static_cast<uint32_t>(framebuffer->height)};
+    renderingInfo.layerCount = 1;
+    renderingInfo.colorAttachmentCount = 1;
+    renderingInfo.pColorAttachments = &colorAttachment;
+
+    vkCmdBeginRendering(state.commandBuffer, &renderingInfo);
+
+    if (state.clearColorPending) {
+        state.clearColorPending = false;
+    }
+
+    VkViewport viewport{};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = static_cast<float>(framebuffer->width);
+    viewport.height = static_cast<float>(framebuffer->height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+
+    vkCmdSetViewport(state.commandBuffer, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.offset = {0, 0};
+    scissor.extent = contextState.swapchainExtent;
+
+    vkCmdSetScissor(state.commandBuffer, 0, 1, &scissor);
+
+    state.rendering = true;
+
 #endif
 }
 
@@ -1966,6 +2053,27 @@ void CommandBuffer::clearColor(float r, float g, float b, float a) {
     if (state.passDescriptor != nullptr && state.encoder == nullptr) {
         configureColorAttachmentForClear(state.passDescriptor, 8,
                                          clearColorValue, true);
+    }
+#elif defined(VULKAN)
+    auto &state = vulkan::commandBufferState(this);
+
+    if (state.rendering) {
+        VkClearAttachment clearAttachment{};
+        clearAttachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        clearAttachment.colorAttachment = 0;
+        clearAttachment.clearValue.color = {{r, g, b, a}};
+
+        VkClearRect clearRect{};
+        clearRect.rect.offset = {0, 0};
+        clearRect.rect.extent = {static_cast<uint32_t>(framebuffer->width),
+                                 static_cast<uint32_t>(framebuffer->height)};
+        clearRect.baseArrayLayer = 0;
+        clearRect.layerCount = 1;
+
+        vkCmdClearAttachments(state.commandBuffer, 1, &clearAttachment, 1,
+                              &clearRect);
+    } else {
+        state.clearColorPending = true;
     }
 #endif
 }

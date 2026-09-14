@@ -91,6 +91,8 @@ struct CommandBufferState {
     VkSemaphore renderFinishedSemaphore = VK_NULL_HANDLE;
     VkFence inFlightFence = VK_NULL_HANDLE;
 
+    bool clearColorPending = false;
+
     uint32_t imageIndex = UINT32_MAX;
 };
 
