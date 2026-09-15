@@ -872,6 +872,24 @@ void Pipeline::build() {
                 static_cast<uint32_t>(patchVertices);
         }
 
+        state.uniformBlocks.clear();
+
+        for (const auto &reflectedBlock : program.uniformBlocks) {
+            uint64_t key =
+                vulkan::bindingKey(reflectedBlock.set, reflectedBlock.binding);
+
+            vulkan::VulkanUniformBlock block{};
+            block.set = reflectedBlock.set;
+            block.binding = reflectedBlock.binding;
+            block.size = static_cast<uint32_t>(reflectedBlock.size);
+
+            block.data.resize(reflectedBlock.size, 0);
+
+            block.dirty = true;
+
+            state.uniformBlocks.emplace(key, std::move(block));
+        }
+
         state.built = true;
     }
 #endif
@@ -1056,6 +1074,8 @@ void Pipeline::setUniform1f(const std::string &name, float v0) {
         glGetUniformLocation(this->shaderProgram->programID, name.c_str()), v0);
 #elif defined(METAL)
     updateMetalUniform(this, name, &v0, sizeof(float), true);
+#elif VULKAN
+    vulkan::updateVulkanUniform(this, name, &v0, sizeof(float), true);
 #endif
 }
 
@@ -1067,6 +1087,9 @@ void Pipeline::setUniformMat4f(const std::string &name,
         GL_FALSE, &matrix[0][0]);
 #elif defined(METAL)
     updateMetalUniform(this, name, &matrix[0][0], sizeof(glm::mat4), true);
+#elif defined(VULKAN)
+    vulkan::updateVulkanUniform(this, name, &matrix[0][0], sizeof(glm::mat4),
+                                true);
 #endif
 }
 
@@ -1079,6 +1102,9 @@ void Pipeline::setUniform3f(const std::string &name, float v0, float v1,
 #elif defined(METAL)
     float data[3] = {v0, v1, v2};
     updateMetalUniform(this, name, data, sizeof(data), true);
+#elif defined(VULKAN)
+    float data[3] = {v0, v1, v2};
+    vulkan::updateVulkanUniform(this, name, data, sizeof(data), true);
 #endif
 }
 
@@ -1088,6 +1114,8 @@ void Pipeline::setUniform1i(const std::string &name, int v0) {
         glGetUniformLocation(this->shaderProgram->programID, name.c_str()), v0);
 #elif defined(METAL)
     updateMetalUniform(this, name, &v0, sizeof(int), true);
+#elif defined(VULKAN)
+    vulkan::updateVulkanUniform(this, name, &v0, sizeof(int), true);
 #endif
 }
 
@@ -1099,6 +1127,9 @@ void Pipeline::setUniformBool(const std::string &name, bool value) {
 #elif defined(METAL)
     int intValue = value ? 1 : 0;
     updateMetalUniform(this, name, &intValue, sizeof(int), true);
+#elif defined(VULKAN)
+    int intValue = value ? 1 : 0;
+    vulkan::updateVulkanUniform(this, name, &intValue, sizeof(int), true);
 #endif
 }
 
@@ -1111,6 +1142,9 @@ void Pipeline::setUniform4f(const std::string &name, float v0, float v1,
 #elif defined(METAL)
     float data[4] = {v0, v1, v2, v3};
     updateMetalUniform(this, name, data, sizeof(data), true);
+#elif defined(VULKAN)
+    float data[4] = {v0, v1, v2, v3};
+    vulkan::updateVulkanUniform(this, name, data, sizeof(data), true);
 #endif
 }
 
@@ -1122,6 +1156,9 @@ void Pipeline::setUniform2f(const std::string &name, float v0, float v1) {
 #elif defined(METAL)
     float data[2] = {v0, v1};
     updateMetalUniform(this, name, data, sizeof(data), true);
+#elif defined(VULKAN)
+    float data[2] = {v0, v1};
+    vulkan::updateVulkanUniform(this, name, data, sizeof(data), true);
 #endif
 }
 
@@ -1137,6 +1174,8 @@ void Pipeline::bindBufferData(const std::string &name, const void *data,
     (void)size;
 #elif defined(METAL)
     updateMetalUniform(this, name, data, size, false);
+#elif defined(VULKAN)
+    vulkan::updateVulkanUniform(this, name, data, size, false);
 #endif
 }
 
@@ -1205,6 +1244,62 @@ void Pipeline::bindBuffer(const std::string &name,
     if (!matchedStage) {
         throw std::runtime_error("Metal buffer binding not found: " + name);
     }
+#elif VULKAN
+    (void)callerId;
+
+    if (!shaderProgram) {
+        throw std::runtime_error(
+            "bindBuffer(opal::Buffer) requires a shader program");
+    }
+
+    auto &programState = vulkan::programState(shaderProgram.get());
+    auto bindingIt = programState.bindingsByName.find(name);
+    if (bindingIt == programState.bindingsByName.end()) {
+        throw std::runtime_error("Vulkan buffer binding not found: " + name);
+    }
+
+    const auto &binding = bindingIt->second;
+
+    if (binding.type != vulkan::ShaderResourceType::UniformBuffer &&
+        binding.type != vulkan::ShaderResourceType::StorageBuffer) {
+        throw std::runtime_error(
+            "bindBuffer(opal::Buffer) requires a uniform or storage buffer "
+            "binding");
+    }
+
+    auto &pipelineState = vulkan::pipelineState(this);
+
+    uint64_t key = vulkan::bindingKey(binding.set, binding.binding);
+
+    if (buffer == nullptr) {
+        pipelineState.boundBuffers.erase(key);
+        pipelineState.descriptorsDirty = true;
+        return;
+    }
+
+    auto &bufferState = vulkan::bufferState(buffer.get());
+    if (bufferState.buffer == VK_NULL_HANDLE) {
+        throw std::runtime_error(
+            "Attempted to bind uninitialized Vulkan buffer");
+    }
+
+    if (binding.type == vulkan::ShaderResourceType::UniformBuffer) {
+        if (!(bufferState.usageFlags & VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) {
+            throw std::runtime_error("Buffer '" + name +
+                                     "' is not a Vulkan uniform buffer");
+        }
+
+    } else {
+        if (!(bufferState.usageFlags & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) {
+            throw std::runtime_error("Buffer '" + name +
+                                     "' is not a Vulkan storage buffer");
+        }
+    }
+
+    pipelineState.boundBuffers[key] = {
+        .buffer = buffer, .offset = 0, .range = VK_WHOLE_SIZE};
+
+    pipelineState.descriptorsDirty = true;
 #endif
 }
 
@@ -1246,6 +1341,32 @@ void Pipeline::bindShaderReadWriteBuffer(const std::string &name,
         throw std::runtime_error("Metal compute buffer binding not found: " +
                                  name);
     }
+#elif defined(VULKAN)
+    if (!shaderProgram) {
+        throw std::runtime_error(
+            "bindShaderReadWriteBuffer requires a shader program");
+    }
+
+    auto &programState = vulkan::programState(shaderProgram.get());
+
+    auto it = programState.bindingsByName.find(name);
+    if (it == programState.bindingsByName.end()) {
+        throw std::runtime_error("Vulkan storage buffer binding not found: " +
+                                 name);
+    }
+
+    const auto &binding = it->second;
+    if (binding.type != vulkan::ShaderResourceType::StorageBuffer) {
+        throw std::runtime_error(
+            "bindShaderReadWriteBuffer requires a storage buffer");
+    }
+
+    if (!(binding.stages & VK_SHADER_STAGE_COMPUTE_BIT)) {
+        throw std::runtime_error(
+            "bindShaderReadWriteBuffer requires a compute-stage binding");
+    }
+
+    bindBuffer(name, buffer, callerId);
 #else
     (void)name;
     (void)buffer;

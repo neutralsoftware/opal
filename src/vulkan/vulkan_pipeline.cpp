@@ -427,33 +427,65 @@ void bindPipeline(CommandBuffer *commandBuffer, Pipeline *pipeline,
                   const RenderTargetSignature &target,
                   VkExtent2D renderExtent) {
     if (commandBuffer == nullptr || pipeline == nullptr) {
-        throw std::runtime_error("Invalid Vulkan pipeline binding");
+        throw std::runtime_error(
+            "bindPipeline requires a command buffer and pipeline");
     }
 
-    auto &commandState = commandBufferState(commandBuffer);
-
+    auto &cmdState = commandBufferState(commandBuffer);
     auto &pipelineState = vulkan::pipelineState(pipeline);
 
     if (!pipelineState.built) {
-        pipeline->build();
+        throw std::runtime_error(
+            "Cannot bind Vulkan pipeline before Pipeline::build()");
     }
+
+    if (pipeline->shaderProgram == nullptr) {
+        throw std::runtime_error(
+            "Cannot bind Vulkan pipeline without shader program");
+    }
+
+    auto &programState = vulkan::programState(pipeline->shaderProgram.get());
 
     const bool compute = pipeline->shaderProgram->isComputeProgram();
 
-    VkPipelineBindPoint bindPoint = compute ? VK_PIPELINE_BIND_POINT_COMPUTE
-                                            : VK_PIPELINE_BIND_POINT_GRAPHICS;
+    VkPipeline vkPipeline = VK_NULL_HANDLE;
+    VkPipelineBindPoint bindPoint;
 
-    VkPipeline vkPipeline = compute
-                                ? pipelineState.computePipeline
-                                : createOrGetGraphicsPipeline(pipeline, target);
+    if (compute) {
+        vkPipeline = pipelineState.computePipeline;
+        bindPoint = VK_PIPELINE_BIND_POINT_COMPUTE;
+    } else {
+        vkPipeline = createOrGetGraphicsPipeline(pipeline, target);
 
-    vkCmdBindPipeline(commandState.commandBuffer, bindPoint, vkPipeline);
+        bindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    }
 
-    commandState.activePipeline = pipeline;
+    if (vkPipeline == VK_NULL_HANDLE) {
+        throw std::runtime_error("Attempted to bind null Vulkan pipeline");
+    }
 
-    commandState.boundPipeline = vkPipeline;
+    vkCmdBindPipeline(cmdState.commandBuffer, bindPoint, vkPipeline);
 
-    commandState.boundPipelineBindPoint = bindPoint;
+    ensureDescriptorSets(pipeline);
+    updateBufferDescriptors(pipeline);
+
+    if (!pipelineState.descriptorSets.empty()) {
+        vkCmdBindDescriptorSets(
+            cmdState.commandBuffer, bindPoint, programState.pipelineLayout, 0,
+            static_cast<uint32_t>(pipelineState.descriptorSets.size()),
+            pipelineState.descriptorSets.data(), 0, nullptr);
+    }
+
+    cmdState.activePipeline = pipeline;
+    cmdState.boundPipeline = vkPipeline;
+    cmdState.boundPipelineLayout = programState.pipelineLayout;
+    cmdState.boundPipelineBindPoint = bindPoint;
+
+    if (!compute) {
+        applyDynamicPipelineState(commandBuffer, pipeline, renderExtent);
+    }
+
+    // Descriptor handling comes here.
 }
 
 void applyDynamicPipelineState(CommandBuffer *commandBuffer, Pipeline *pipeline,
@@ -494,6 +526,169 @@ void applyDynamicPipelineState(CommandBuffer *commandBuffer, Pipeline *pipeline,
         vkCmdSetDepthBias(state.commandBuffer, pipeline->polygonOffsetUnits,
                           0.0f, pipeline->polygonOffsetFactor);
     }
+}
+
+void ensureDescriptorSets(Pipeline *pipeline) {
+    auto &state = pipelineState(pipeline);
+    if (state.descriptorsAllocated) {
+        return;
+    }
+
+    auto &program = programState(pipeline->shaderProgram.get());
+    if (program.descriptorSetLayouts.empty()) {
+        state.descriptorsAllocated = true;
+        return;
+    }
+
+    auto &device = deviceState(Device::globalInstance);
+
+    std::unordered_map<VkDescriptorType, uint32_t> descriptorCounts;
+    for (const auto &binding : program.bindings) {
+        VkDescriptorType type = descriptorTypeToVk(binding.type);
+
+        descriptorCounts[type] += binding.count;
+    }
+
+    std::vector<VkDescriptorPoolSize> poolSizes;
+    poolSizes.reserve(descriptorCounts.size());
+
+    for (const auto &[type, count] : descriptorCounts) {
+        poolSizes.push_back({.type = type, .descriptorCount = count});
+    }
+
+    VkDescriptorPoolCreateInfo poolInfo{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .maxSets = static_cast<uint32_t>(program.descriptorSetLayouts.size()),
+        .poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
+        .pPoolSizes = poolSizes.data()};
+
+    VULKAN_GUARD(vkCreateDescriptorPool(device.device, &poolInfo, nullptr,
+                                        &state.descriptorPool),
+                 "Failed to create Vulkan descriptor pool");
+
+    state.descriptorSets.resize(program.descriptorSetLayouts.size());
+
+    VkDescriptorSetAllocateInfo allocationInfo{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .pNext = nullptr,
+        .descriptorPool = state.descriptorPool,
+        .descriptorSetCount =
+            static_cast<uint32_t>(program.descriptorSetLayouts.size()),
+        .pSetLayouts = program.descriptorSetLayouts.data()};
+
+    VULKAN_GUARD(vkAllocateDescriptorSets(device.device, &allocationInfo,
+                                          state.descriptorSets.data()),
+                 "Failed to allocate Vulkan descriptor sets");
+
+    state.descriptorsAllocated = true;
+    state.descriptorsDirty = true;
+}
+
+void updateBufferDescriptors(Pipeline *pipeline) {
+    auto &state = pipelineState(pipeline);
+    if (!state.descriptorsDirty) {
+        return;
+    }
+
+    auto &program = programState(pipeline->shaderProgram.get());
+    auto &device = deviceState(Device::globalInstance);
+
+    std::vector<VkDescriptorBufferInfo> bufferInfos;
+    std::vector<VkWriteDescriptorSet> writes;
+
+    bufferInfos.reserve(state.boundBuffers.size());
+    writes.reserve(state.boundBuffers.size());
+
+    for (const auto &binding : program.bindings) {
+        if (binding.type != ShaderResourceType::UniformBuffer &&
+            binding.type != ShaderResourceType::StorageBuffer) {
+            continue;
+        }
+
+        uint64_t key = bindingKey(binding.set, binding.binding);
+
+        auto resourceIt = state.boundBuffers.find(key);
+        if (resourceIt == state.boundBuffers.end()) {
+            continue;
+        }
+
+        const BoundBufferResource &resource = resourceIt->second;
+        if (!resource.buffer) {
+            continue;
+        }
+
+        auto &buffer = bufferState(resource.buffer.get());
+        VkDeviceSize range = resource.range;
+        if (range == VK_WHOLE_SIZE) {
+            range = buffer.size - resource.offset;
+        }
+
+        bufferInfos.push_back({.buffer = buffer.buffer,
+                               .offset = resource.offset,
+                               .range = range});
+
+        VkWriteDescriptorSet write{
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .pNext = nullptr,
+            .dstSet = state.descriptorSets.at(binding.set),
+            .dstBinding = binding.binding,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = descriptorTypeToVk(binding.type),
+            .pImageInfo = nullptr,
+            .pBufferInfo = &bufferInfos.back(),
+            .pTexelBufferView = nullptr};
+
+        writes.push_back(write);
+    }
+
+    if (!writes.empty()) {
+        vkUpdateDescriptorSets(device.device,
+                               static_cast<uint32_t>(writes.size()),
+                               writes.data(), 0, nullptr);
+    }
+
+    state.descriptorsDirty = false;
+}
+
+void updateVulkanUniform(Pipeline *pipeline, const std::string &name,
+                         const void *data, size_t size,
+                         bool clampToDeclaredSize) {
+    if (pipeline == nullptr || pipeline->shaderProgram == nullptr ||
+        data == nullptr || size == 0) {
+        return;
+    }
+
+    auto &programState = vulkan::programState(pipeline->shaderProgram.get());
+
+    auto locationIt = programState.uniformsByName.find(name);
+    if (locationIt == programState.uniformsByName.end()) {
+        return;
+    }
+
+    const auto &member = locationIt->second;
+
+    uint64_t key = vulkan::bindingKey(member.set, member.binding);
+    auto &pipelineState = vulkan::pipelineState(pipeline);
+
+    auto blockIt = pipelineState.uniformBlocks.find(key);
+    if (blockIt == pipelineState.uniformBlocks.end()) {
+        throw std::runtime_error("Uniform block not initialized for '" + name +
+                                 "'");
+    }
+
+    auto &block = blockIt->second;
+
+    size_t writeSize = clampToDeclaredSize ? std::min(size, member.size) : size;
+    if (member.offset + writeSize > block.data.size()) {
+        throw std::runtime_error("Uniform write exceeds block size: " + name);
+    }
+
+    std::memcpy(block.data.data() + member.offset, data, writeSize);
+
+    block.dirty = true;
 }
 
 } // namespace opal::vulkan

@@ -346,6 +346,16 @@ struct PipelineState {
                        RenderTargetSignatureHash>
         graphicsPipelines;
 
+    std::unordered_map<uint64_t, VulkanUniformBlock> uniformBlocks;
+
+    std::unordered_map<uint64_t, BoundBufferResource> boundBuffers;
+
+    VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> descriptorSets;
+
+    bool descriptorsAllocated = false;
+    bool descriptorsDirty = true;
+
     bool built = false;
 };
 
@@ -465,6 +475,11 @@ VkBufferUsageFlags bufferUsageToVk(BufferUsage usage);
 void createBuffer(DeviceState &deviceState, VkDeviceSize size,
                   VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
                   VkBuffer &buffer, VkDeviceMemory &memory);
+void ensureDescriptorSets(Pipeline *pipeline);
+void updateBufferDescriptors(Pipeline *pipeline);
+void updateVulkanUniform(Pipeline *pipeline, const std::string &name,
+                         const void *data, size_t size,
+                         bool clampToDeclaredSize);
 
 } // namespace opal::vulkan
 
