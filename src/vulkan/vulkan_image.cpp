@@ -254,6 +254,132 @@ VkSampleCountFlagBits sampleCountFlagBitsFor(int samples) {
     }
 }
 
+RenderTargetSignature
+getRenderTargetSignature(const std::shared_ptr<Framebuffer> &framebuffer,
+                         Device *device) {
+    if (framebuffer == nullptr || device == nullptr) {
+        throw std::runtime_error(
+            "Cannot determine Vulkan render target without framebuffer/device");
+    }
+
+    RenderTargetSignature signature{};
+
+    if (framebuffer->isDefaultFramebuffer) {
+        auto &context = vulkan::contextState(device->context.get());
+
+        signature.colorFormats.push_back(context.swapchainImageFormat);
+
+        signature.depthFormat = VK_FORMAT_UNDEFINED;
+        signature.stencilFormat = VK_FORMAT_UNDEFINED;
+        signature.samples = VK_SAMPLE_COUNT_1_BIT;
+
+        return signature;
+    }
+
+    const int drawLimit = framebuffer->getDrawBufferCount();
+
+    int colorIndex = 0;
+
+    for (const auto &attachment : framebuffer->attachments) {
+        if (attachment.texture == nullptr) {
+            continue;
+        }
+
+        auto &texture = vulkan::textureState(attachment.texture.get());
+
+        switch (attachment.type) {
+        case Attachment::Type::Color:
+            if (!framebuffer->colorBufferDisabled &&
+                (drawLimit < 0 || colorIndex < drawLimit)) {
+                signature.colorFormats.push_back(texture.format);
+            }
+
+            ++colorIndex;
+
+            signature.samples =
+                std::max(signature.samples, texture.sampleCount);
+
+            break;
+
+        case Attachment::Type::Depth:
+            signature.depthFormat = texture.format;
+            signature.samples =
+                std::max(signature.samples, texture.sampleCount);
+            break;
+
+        case Attachment::Type::Stencil:
+            signature.stencilFormat = texture.format;
+            signature.samples =
+                std::max(signature.samples, texture.sampleCount);
+            break;
+
+        case Attachment::Type::DepthStencil:
+            signature.depthFormat = texture.format;
+            signature.stencilFormat = texture.format;
+            signature.samples =
+                std::max(signature.samples, texture.sampleCount);
+            break;
+
+        default:
+            break;
+        }
+    }
+
+    return signature;
+}
+
+VkExtent2D getRenderExtent(const std::shared_ptr<Framebuffer> &framebuffer,
+                           Device *device) {
+    if (framebuffer->isDefaultFramebuffer) {
+        return vulkan::contextState(device->context.get()).swapchainExtent;
+    }
+
+    return {static_cast<uint32_t>(std::max(framebuffer->width, 1)),
+            static_cast<uint32_t>(std::max(framebuffer->height, 1))};
+}
+
+void bindVulkanDrawingState(CommandBuffer *commandBuffer,
+                            const std::shared_ptr<DrawingState> &drawingState,
+                            const std::shared_ptr<Pipeline> &pipeline) {
+
+    if (drawingState == nullptr) {
+        return;
+    }
+
+    auto &cmd = vulkan::commandBufferState(commandBuffer);
+
+    if (drawingState->vertexBuffer != nullptr) {
+        auto &vertex = vulkan::bufferState(drawingState->vertexBuffer.get());
+        if (vertex.buffer == VK_NULL_HANDLE) {
+            throw std::runtime_error("Vulkan vertex buffer is not initialized");
+        }
+
+        VkDeviceSize offset = 0;
+        vkCmdBindVertexBuffers(cmd.commandBuffer, 0, 1, &vertex.buffer,
+                               &offset);
+    }
+
+    auto &pipelineState = vulkan::pipelineState(pipeline.get());
+    const bool expectsInstanceBuffer = pipelineState.vertexBindings.size() > 1;
+
+    if (drawingState->instanceBuffer != nullptr) {
+        auto &instance =
+            vulkan::bufferState(drawingState->instanceBuffer.get());
+        if (instance.buffer == VK_NULL_HANDLE) {
+            throw std::runtime_error(
+                "Vulkan instance buffer is not initialized");
+        }
+
+        VkDeviceSize offset = 0;
+        vkCmdBindVertexBuffers(cmd.commandBuffer, 1, 1, &instance.buffer,
+                               &offset);
+
+    } else if (expectsInstanceBuffer) {
+        throw std::runtime_error("Pipeline expects instance vertex data, "
+                                 "but DrawingState has no instance buffer");
+    }
+}
+
 } // namespace opal::vulkan
 
 #endif

@@ -481,6 +481,15 @@ void updateVulkanUniform(Pipeline *pipeline, const std::string &name,
                          const void *data, size_t size,
                          bool clampToDeclaredSize);
 
+RenderTargetSignature
+getRenderTargetSignature(const std::shared_ptr<Framebuffer> &framebuffer,
+                         Device *device);
+VkExtent2D getRenderExtent(const std::shared_ptr<Framebuffer> &framebuffer,
+                           Device *device);
+void bindVulkanDrawingState(CommandBuffer *commandBuffer,
+                            const std::shared_ptr<DrawingState> &drawingState,
+                            const std::shared_ptr<Pipeline> &pipeline);
+
 } // namespace opal::vulkan
 
 #endif

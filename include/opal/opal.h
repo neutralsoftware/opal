@@ -823,9 +823,9 @@ class Framebuffer {
     int height;
     std::vector<Attachment> attachments;
     bool isDefaultFramebuffer = false;
+    bool colorBufferDisabled = false;
 
   private:
-    bool colorBufferDisabled = false;
     int drawBufferCount = -1;
 
     friend class CommandBuffer;

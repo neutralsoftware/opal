@@ -37,6 +37,8 @@ namespace opal {
 CommandBuffer::~CommandBuffer() {
 #ifdef METAL
     metal::releaseCommandBufferState(this);
+#elif VULKAN
+    vulkan::releaseCommandBufferState(this);
 #endif
 }
 
@@ -1821,7 +1823,14 @@ void CommandBuffer::beginPass(std::shared_ptr<RenderPass> newRenderPass) {
 
     VkRect2D scissor{};
     scissor.offset = {0, 0};
-    scissor.extent = contextState.swapchainExtent;
+
+    if (framebuffer->isDefaultFramebuffer) {
+        scissor.extent = contextState.swapchainExtent;
+    } else {
+        scissor.extent = {
+            static_cast<uint32_t>(std::max(framebuffer->width, 1)),
+            static_cast<uint32_t>(std::max(framebuffer->height, 1))};
+    }
 
     vkCmdSetScissor(state.commandBuffer, 0, 1, &scissor);
 
@@ -1874,6 +1883,14 @@ void CommandBuffer::endPass() {
     }
 
     vkCmdEndRendering(state.commandBuffer);
+
+    if (framebuffer == nullptr || !framebuffer->isDefaultFramebuffer ||
+        !state.needsPresent) {
+        state.rendering = false;
+        renderPass = nullptr;
+        framebuffer = nullptr;
+        return;
+    }
 
     VkImage image = contextState.swapchainImages[state.imageIndex];
 
@@ -2066,6 +2083,17 @@ void CommandBuffer::waitForSubmittedWork() {
     }
     state.inFlightCommandBuffers.clear();
     state.inFlightResources.clear();
+#elif defined(VULKAN)
+    auto &state = vulkan::commandBufferState(this);
+    if (state.inFlightFence == VK_NULL_HANDLE) {
+        return;
+    }
+
+    auto &deviceState = vulkan::deviceState(device);
+
+    VULKAN_GUARD(vkWaitForFences(deviceState.device, 1, &state.inFlightFence,
+                                 VK_TRUE, UINT64_MAX),
+                 "Failed waiting for Vulkan submitted work");
 #endif
 }
 
@@ -2075,6 +2103,12 @@ void CommandBuffer::bindPipeline(const std::shared_ptr<Pipeline> &pipeline) {
 #endif
     pipeline->bind();
     boundPipeline = pipeline;
+
+#ifdef VULKAN
+    auto &state = vulkan::commandBufferState(this);
+
+    state.activePipeline = pipeline.get();
+#endif
 }
 
 void CommandBuffer::unbindPipeline() { boundPipeline = nullptr; }
@@ -2142,6 +2176,41 @@ auto CommandBuffer::draw(uint vertexCount, uint instanceCount, uint firstVertex,
                                   static_cast<NS::UInteger>(instanceCount),
                                   static_cast<NS::UInteger>(firstInstance));
     state.hasDraw = true;
+#elif VULKAN
+    if (boundPipeline == nullptr || framebuffer == nullptr) {
+        throw std::runtime_error(
+            "Vulkan command buffer cannot draw without a bound pipeline and "
+            "framebuffer");
+    }
+
+    auto &state = vulkan::commandBufferState(this);
+
+    if (!state.recording) {
+        throw std::runtime_error(
+            "Vulkan command buffer is not recording before draw");
+    }
+
+    if (!state.rendering) {
+        throw std::runtime_error(
+            "Vulkan command buffer is not rendering before draw");
+    }
+
+    if (boundPipeline->shaderProgram == nullptr ||
+        boundPipeline->shaderProgram->isComputeProgram()) {
+        throw std::runtime_error(
+            "Vulkan command buffer cannot draw with a compute shader program");
+    }
+
+    const auto target = vulkan::getRenderTargetSignature(framebuffer, device);
+    const VkExtent2D targetExtent =
+        vulkan::getRenderExtent(framebuffer, device);
+
+    vulkan::bindPipeline(this, boundPipeline.get(), target, targetExtent);
+
+    vulkan::bindVulkanDrawingState(this, boundDrawingState, boundPipeline);
+
+    vkCmdDraw(state.commandBuffer, vertexCount, instanceCount, firstVertex,
+              firstInstance);
 #endif
 
     detail::emit(DrawEvent{std::to_string(objectId), DrawType::Draw,
@@ -2216,6 +2285,44 @@ void CommandBuffer::drawIndexed(uint indexCount, uint instanceCount,
         static_cast<NS::UInteger>(instanceCount), vertexOffset,
         static_cast<NS::UInteger>(firstInstance));
     state.hasDraw = true;
+#elif defined(VULKAN)
+    if (boundPipeline == nullptr) {
+        throw std::runtime_error("Vulkan indexed draw requires a pipeline");
+    }
+
+    if (framebuffer == nullptr) {
+        throw std::runtime_error("Vulkan indexed draw requires an active pass");
+    }
+
+    if (boundDrawingState == nullptr ||
+        boundDrawingState->indexBuffer == nullptr) {
+        throw std::runtime_error(
+            "Vulkan indexed draw requires an index buffer");
+    }
+
+    auto &state = vulkan::commandBufferState(this);
+    if (!state.recording || !state.rendering) {
+        throw std::runtime_error(
+            "Vulkan indexed draw requires active rendering");
+    }
+
+    const auto target = vulkan::getRenderTargetSignature(framebuffer, device);
+    const VkExtent2D extent = vulkan::getRenderExtent(framebuffer, device);
+
+    vulkan::bindPipeline(this, boundPipeline.get(), target, extent);
+
+    vulkan::bindVulkanDrawingState(this, boundDrawingState, boundPipeline);
+
+    auto &index = vulkan::bufferState(boundDrawingState->indexBuffer.get());
+    if (index.buffer == VK_NULL_HANDLE) {
+        throw std::runtime_error("Vulkan index buffer is not initialized");
+    }
+
+    vkCmdBindIndexBuffer(state.commandBuffer, index.buffer, 0,
+                         VK_INDEX_TYPE_UINT32);
+
+    vkCmdDrawIndexed(state.commandBuffer, indexCount, instanceCount, firstIndex,
+                     vertexOffset, firstInstance);
 #endif
 
     detail::emit(DrawEvent{std::to_string(objectId), DrawType::Indexed,
@@ -2275,6 +2382,30 @@ void CommandBuffer::drawPatches(uint vertexCount, uint firstVertex,
                                   static_cast<NS::UInteger>(firstVertex),
                                   static_cast<NS::UInteger>(vertexCount));
     state.hasDraw = true;
+#elif defined(VULKAN)
+    if (boundPipeline == nullptr || framebuffer == nullptr) {
+        throw std::runtime_error(
+            "Vulkan patch draw requires pipeline and framebuffer");
+    }
+
+    auto &state = vulkan::commandBufferState(this);
+    if (!state.rendering) {
+        throw std::runtime_error("Vulkan patch draw requires active rendering");
+    }
+
+    auto &pipelineState = vulkan::pipelineState(boundPipeline.get());
+    if (!pipelineState.hasTessellation) {
+        throw std::runtime_error(
+            "drawPatches requires a tessellation pipeline");
+    }
+
+    const auto target = vulkan::getRenderTargetSignature(framebuffer, device);
+    const auto extent = vulkan::getRenderExtent(framebuffer, device);
+
+    vulkan::bindPipeline(this, boundPipeline.get(), target, extent);
+    vulkan::bindVulkanDrawingState(this, boundDrawingState, boundPipeline);
+
+    vkCmdDraw(state.commandBuffer, vertexCount, 1, firstVertex, 0);
 #endif
 
     detail::emit(DrawEvent{std::to_string(objectId), DrawType::Patch,
@@ -2394,6 +2525,49 @@ void CommandBuffer::dispatch(uint threadCountX, uint threadCountY,
                   (countZ + tgZ - 1) / tgZ);
     state.computeEncoder->dispatchThreadgroups(threadgroups, threadsPerGroup);
     state.hasDraw = true;
+#elif defined(VULKAN)
+    if (boundPipeline == nullptr || boundPipeline->shaderProgram == nullptr) {
+        throw std::runtime_error("Vulkan dispatch requires a bound pipeline");
+    }
+
+    if (!boundPipeline->shaderProgram->isComputeProgram()) {
+        throw std::runtime_error("Vulkan dispatch requires a compute pipeline");
+    }
+
+    auto &state = vulkan::commandBufferState(this);
+
+    if (!state.recording) {
+        throw std::runtime_error(
+            "Vulkan dispatch requires command buffer recording");
+    }
+
+    if (state.rendering) {
+        endPass();
+    }
+
+    vulkan::RenderTargetSignature dummyTarget{};
+
+    vulkan::bindPipeline(this, boundPipeline.get(), dummyTarget, {1, 1});
+
+    const uint32_t groupSizeX =
+        std::max<uint32_t>(1, boundPipeline->getComputeThreadgroupSizeX());
+
+    const uint32_t groupSizeY =
+        std::max<uint32_t>(1, boundPipeline->getComputeThreadgroupSizeY());
+
+    const uint32_t groupSizeZ =
+        std::max<uint32_t>(1, boundPipeline->getComputeThreadgroupSizeZ());
+
+    const uint32_t groupsX =
+        (std::max(threadCountX, 1u) + groupSizeX - 1) / groupSizeX;
+
+    const uint32_t groupsY =
+        (std::max(threadCountY, 1u) + groupSizeY - 1) / groupSizeY;
+
+    const uint32_t groupsZ =
+        (std::max(threadCountZ, 1u) + groupSizeZ - 1) / groupSizeZ;
+
+    vkCmdDispatch(state.commandBuffer, groupsX, groupsY, groupsZ);
 #endif
 }
 
@@ -2404,6 +2578,33 @@ void CommandBuffer::computeBarrier() {
         state.computeEncoder->memoryBarrier(MTL::BarrierScope(
             MTL::BarrierScopeBuffers | MTL::BarrierScopeTextures));
     }
+#elif defined(VULKAN)
+
+    auto &state = vulkan::commandBufferState(this);
+
+    if (!state.recording) {
+        throw std::runtime_error(
+            "computeBarrier called outside Vulkan recording");
+    }
+
+    VkMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    barrier.srcAccessMask =
+        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                           VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+                           VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT |
+                            VK_ACCESS_2_SHADER_READ_BIT;
+
+    VkDependencyInfo dependency{};
+    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &barrier;
+
+    vkCmdPipelineBarrier2(state.commandBuffer, &dependency);
 #endif
 }
 
@@ -2431,6 +2632,70 @@ void CommandBuffer::generateMipmaps(const std::shared_ptr<Texture> &texture) {
     auto *blitEncoder = state.commandBuffer->blitCommandEncoder();
     blitEncoder->generateMipmaps(textureState.texture);
     blitEncoder->endEncoding();
+#elif defined(VULKAN)
+    auto &cmd = vulkan::commandBufferState(this);
+    auto &tex = vulkan::textureState(texture.get());
+
+    if (tex.mipLevels <= 1) {
+        return;
+    }
+
+    if (!cmd.recording) {
+        throw std::runtime_error("generateMipmaps requires command recording");
+    }
+
+    int32_t mipWidth = static_cast<int32_t>(tex.width);
+    int32_t mipHeight = static_cast<int32_t>(tex.height);
+
+    for (uint32_t i = 1; i < tex.mipLevels; ++i) {
+        VkImageMemoryBarrier2 toSource{};
+        toSource.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        toSource.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        toSource.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        toSource.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        toSource.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+        toSource.oldLayout =
+            i == 1 ? tex.layout : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        toSource.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        toSource.image = tex.image;
+        toSource.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        toSource.subresourceRange.baseMipLevel = i - 1;
+        toSource.subresourceRange.levelCount = 1;
+        toSource.subresourceRange.baseArrayLayer = 0;
+        toSource.subresourceRange.layerCount = tex.arrayLayers;
+
+        VkDependencyInfo dep{};
+        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep.imageMemoryBarrierCount = 1;
+        dep.pImageMemoryBarriers = &toSource;
+
+        vkCmdPipelineBarrier2(cmd.commandBuffer, &dep);
+
+        VkImageBlit blit{};
+        blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.srcSubresource.mipLevel = i - 1;
+        blit.srcSubresource.baseArrayLayer = 0;
+        blit.srcSubresource.layerCount = tex.arrayLayers;
+        blit.srcOffsets[1] = {mipWidth, mipHeight, 1};
+        blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.dstSubresource.mipLevel = i;
+        blit.dstSubresource.baseArrayLayer = 0;
+        blit.dstSubresource.layerCount = tex.arrayLayers;
+
+        const int32_t nextWidth = std::max(1, mipWidth / 2);
+
+        const int32_t nextHeight = std::max(1, mipHeight / 2);
+
+        blit.dstOffsets[1] = {nextWidth, nextHeight, 1};
+
+        vkCmdBlitImage(cmd.commandBuffer, tex.image,
+                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, tex.image,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                       VK_FILTER_LINEAR);
+
+        mipWidth = nextWidth;
+        mipHeight = nextHeight;
+    }
 #endif
 }
 
@@ -2526,7 +2791,7 @@ void CommandBuffer::clearDepth(float depth) {
         vkCmdClearAttachments(state.commandBuffer, 1, &clearAttachment, 1,
                               &clearRect);
     } else {
-        state.clearColorPending = true;
+        state.clearDepthPending = true;
     }
 #endif
 }
