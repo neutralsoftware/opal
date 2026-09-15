@@ -7,7 +7,9 @@
 // Copyright (c) 2026 Max Van den Eynde
 //
 
+#include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <set>
 #include <tuple>
 #include <unordered_map>
@@ -21,6 +23,22 @@
 #include <vulkan/vulkan.h>
 
 namespace opal::vulkan {
+
+bool hasDeviceExtension(VkPhysicalDevice device, const char *name) {
+    uint32_t extensionCount = 0;
+    VULKAN_GUARD(vkEnumerateDeviceExtensionProperties(device, nullptr,
+                                                      &extensionCount, nullptr),
+                 "Failed to enumerate Vulkan device extensions");
+    std::vector<VkExtensionProperties> extensions(extensionCount);
+    VULKAN_GUARD(vkEnumerateDeviceExtensionProperties(
+                     device, nullptr, &extensionCount, extensions.data()),
+                 "Failed to enumerate Vulkan device extensions");
+    return std::any_of(extensions.begin(), extensions.end(),
+                       [&](const VkExtensionProperties &extension) {
+                           return std::strcmp(extension.extensionName, name) ==
+                                  0;
+                       });
+}
 
 PhysicalDeviceInfo pickPhysicalDevice(VkInstance instance,
                                       VkSurfaceKHR surface) {
@@ -41,13 +59,46 @@ PhysicalDeviceInfo pickPhysicalDevice(VkInstance instance,
         features13.sType =
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
 
+        VkPhysicalDevicePortabilitySubsetFeaturesKHR portabilityFeatures{};
+        portabilityFeatures.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR;
+        const bool hasPortabilitySubset = hasDeviceExtension(
+            device, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+
+        VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT divisorFeatures{};
+        divisorFeatures.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT;
+        const bool hasVertexAttributeDivisor = hasDeviceExtension(
+            device, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
+
+        features13.pNext =
+            hasPortabilitySubset ? static_cast<void *>(&portabilityFeatures)
+            : hasVertexAttributeDivisor ? static_cast<void *>(&divisorFeatures)
+                                        : nullptr;
+        if (hasPortabilitySubset && hasVertexAttributeDivisor) {
+            portabilityFeatures.pNext = &divisorFeatures;
+        }
+
         VkPhysicalDeviceFeatures2 features{};
         features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
         features.pNext = &features13;
         vkGetPhysicalDeviceFeatures2(device, &features);
 
         DeviceQueueFamilies queueFamilies = findQueueFamilies(device, surface);
-        if (!queueFamilies.isComplete()) {
+        if (!queueFamilies.isComplete() ||
+            deviceProperties.apiVersion < VK_API_VERSION_1_3 ||
+            !features13.dynamicRendering || !features13.synchronization2 ||
+            !hasDeviceExtension(device, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
+            continue;
+        }
+
+        uint32_t formatCount = 0;
+        uint32_t presentModeCount = 0;
+        vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount,
+                                             nullptr);
+        vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface,
+                                                  &presentModeCount, nullptr);
+        if (formatCount == 0 || presentModeCount == 0) {
             continue;
         }
 
@@ -85,14 +136,19 @@ PhysicalDeviceInfo pickPhysicalDevice(VkInstance instance,
             score += 250;
         }
 
-        if (supportsRayTracing(device)) {
-            score += 5000;
-        }
-
         PhysicalDeviceInfo info{};
         info.device = device;
         info.features = features;
         info.features13 = features13;
+        info.features13.pNext = nullptr;
+        info.portabilityFeatures = portabilityFeatures;
+        info.portabilityFeatures.pNext = nullptr;
+        info.hasPortabilitySubset = hasPortabilitySubset;
+        info.divisorFeatures = divisorFeatures;
+        info.divisorFeatures.pNext = nullptr;
+        info.hasVertexAttributeDivisor =
+            hasVertexAttributeDivisor &&
+            divisorFeatures.vertexAttributeInstanceRateDivisor;
         info.features.pNext = nullptr;
         info.queueFamilies = queueFamilies;
         info.properties = deviceProperties;
@@ -100,8 +156,12 @@ PhysicalDeviceInfo pickPhysicalDevice(VkInstance instance,
         suitableDevices.push_back(info);
     }
 
-    std::tuple<PhysicalDeviceInfo, uint32_t> bestDevice{};
-    for (int i = 0; i < suitableDevices.size(); ++i) {
+    if (suitableDevices.empty()) {
+        return {};
+    }
+    std::tuple<PhysicalDeviceInfo, uint32_t> bestDevice{
+        suitableDevices.front(), deviceScores[suitableDevices.front().device]};
+    for (size_t i = 1; i < suitableDevices.size(); ++i) {
         const auto &deviceInfo = suitableDevices[i];
         uint32_t score = deviceScores[deviceInfo.device];
 
@@ -140,25 +200,14 @@ DeviceQueueFamilies findQueueFamilies(VkPhysicalDevice device,
         const bool computeSupport =
             queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT;
 
-        if (graphicsSupport && result.graphicsQueueFamilyIndex == UINT32_MAX) {
+        if (graphicsSupport && computeSupport &&
+            result.graphicsQueueFamilyIndex == UINT32_MAX) {
             result.graphicsQueueFamilyIndex = i;
+            result.computeQueueFamilyIndex = i;
         }
 
         if (presentSupport && result.presentQueueFamilyIndex == UINT32_MAX) {
             result.presentQueueFamilyIndex = i;
-        }
-
-        if (computeSupport && !graphicsSupport) {
-            result.computeQueueFamilyIndex = i;
-        }
-    }
-
-    if (result.computeQueueFamilyIndex == UINT32_MAX) {
-        for (uint32_t i = 0; i < queueFamilyCount; ++i) {
-            if (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
-                result.computeQueueFamilyIndex = i;
-                break;
-            }
         }
     }
 
@@ -262,42 +311,79 @@ VkDevice createLogicalDevice(const PhysicalDeviceInfo &physicalDeviceInfo) {
 
     std::vector<const char *> deviceExtensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME};
-    if (supportsRayTracing(physicalDeviceInfo.device)) {
-        deviceExtensions.push_back(
-            VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
-        deviceExtensions.push_back(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
+    if (hasDeviceExtension(physicalDeviceInfo.device,
+                           VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) {
+        deviceExtensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
     }
-
-    VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingFeatures{};
-    rayTracingFeatures.sType =
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
-
-    VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationFeatures{};
-    accelerationFeatures.sType =
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+    if (physicalDeviceInfo.hasVertexAttributeDivisor) {
+        deviceExtensions.push_back(
+            VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
+    }
 
     VkPhysicalDeviceVulkan13Features features13{};
     features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-    features13.dynamicRendering =
-        physicalDeviceInfo.features13.dynamicRendering;
-    features13.synchronization2 =
-        physicalDeviceInfo.features13.synchronization2;
+    features13.dynamicRendering = VK_TRUE;
+    features13.synchronization2 = VK_TRUE;
+
+    VkPhysicalDevicePortabilitySubsetFeaturesKHR portabilityFeatures{};
+    portabilityFeatures.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR;
+    if (physicalDeviceInfo.hasPortabilitySubset) {
+        portabilityFeatures.constantAlphaColorBlendFactors =
+            physicalDeviceInfo.portabilityFeatures
+                .constantAlphaColorBlendFactors;
+        portabilityFeatures.events =
+            physicalDeviceInfo.portabilityFeatures.events;
+        portabilityFeatures.imageViewFormatReinterpretation =
+            physicalDeviceInfo.portabilityFeatures
+                .imageViewFormatReinterpretation;
+        portabilityFeatures.imageViewFormatSwizzle =
+            physicalDeviceInfo.portabilityFeatures.imageViewFormatSwizzle;
+        portabilityFeatures.multisampleArrayImage =
+            physicalDeviceInfo.portabilityFeatures.multisampleArrayImage;
+        portabilityFeatures.mutableComparisonSamplers =
+            physicalDeviceInfo.portabilityFeatures.mutableComparisonSamplers;
+        portabilityFeatures.pointPolygons =
+            physicalDeviceInfo.portabilityFeatures.pointPolygons;
+        portabilityFeatures.samplerMipLodBias =
+            physicalDeviceInfo.portabilityFeatures.samplerMipLodBias;
+        portabilityFeatures.separateStencilMaskRef =
+            physicalDeviceInfo.portabilityFeatures.separateStencilMaskRef;
+        portabilityFeatures.shaderSampleRateInterpolationFunctions =
+            physicalDeviceInfo.portabilityFeatures
+                .shaderSampleRateInterpolationFunctions;
+        portabilityFeatures.tessellationIsolines =
+            physicalDeviceInfo.portabilityFeatures.tessellationIsolines;
+        portabilityFeatures.tessellationPointMode =
+            physicalDeviceInfo.portabilityFeatures.tessellationPointMode;
+        portabilityFeatures.triangleFans =
+            physicalDeviceInfo.portabilityFeatures.triangleFans;
+        portabilityFeatures.vertexAttributeAccessBeyondStride =
+            physicalDeviceInfo.portabilityFeatures
+                .vertexAttributeAccessBeyondStride;
+    }
+
+    VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT divisorFeatures{};
+    divisorFeatures.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT;
+    if (physicalDeviceInfo.hasVertexAttributeDivisor) {
+        divisorFeatures.vertexAttributeInstanceRateDivisor = VK_TRUE;
+    }
+
+    features13.pNext = physicalDeviceInfo.hasPortabilitySubset
+                           ? static_cast<void *>(&portabilityFeatures)
+                       : physicalDeviceInfo.hasVertexAttributeDivisor
+                           ? static_cast<void *>(&divisorFeatures)
+                           : nullptr;
+    if (physicalDeviceInfo.hasPortabilitySubset &&
+        physicalDeviceInfo.hasVertexAttributeDivisor) {
+        portabilityFeatures.pNext = &divisorFeatures;
+    }
 
     VkPhysicalDeviceFeatures2 features2{};
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 
-    features2.features.samplerAnisotropy =
-        physicalDeviceInfo.features.features.samplerAnisotropy;
-
-    bool rayTracing = supportsRayTracing(physicalDeviceInfo.device);
-
-    if (rayTracing) {
-        accelerationFeatures.accelerationStructure = VK_TRUE;
-        rayTracingFeatures.rayTracingPipeline = VK_TRUE;
-
-        features13.pNext = &accelerationFeatures;
-        accelerationFeatures.pNext = &rayTracingFeatures;
-    }
+    features2.features = physicalDeviceInfo.features.features;
 
     features2.pNext = &features13;
 

@@ -10,7 +10,10 @@
 #ifndef VULKAN_STATE_H
 #define VULKAN_STATE_H
 
-#include "slang/external/vulkan/include/vulkan/vulkan_core.h"
+#ifndef VK_ENABLE_BETA_EXTENSIONS
+#define VK_ENABLE_BETA_EXTENSIONS
+#endif
+
 #include <cwchar>
 #include <vector>
 #ifdef VULKAN
@@ -19,13 +22,17 @@
 #include "slang-com-ptr.h"
 #include <slang.h>
 #include <vulkan/vulkan.h>
+#include <vulkan/vulkan_beta.h>
 
 #define VULKAN_GUARD(call, message)                                            \
     do {                                                                       \
-        VkResult result = (call);                                              \
-        if (result != VK_SUCCESS) {                                            \
-            opal::detail::log(LogLevel::Error, (message));                     \
-            throw std::runtime_error(message);                                 \
+        VkResult opalVulkanResult = (call);                                    \
+        if (opalVulkanResult != VK_SUCCESS) {                                  \
+            std::string error =                                                \
+                std::string(message) + " (VkResult " +                         \
+                std::to_string(static_cast<int>(opalVulkanResult)) + ")";      \
+            opal::detail::log(LogLevel::Error, error);                         \
+            throw std::runtime_error(error);                                   \
         }                                                                      \
     } while (false)
 
@@ -51,6 +58,8 @@ struct ContextState {
     VkExtent2D swapchainExtent{};
 
     uint32_t apiVersion = VK_API_VERSION_1_0;
+
+    bool validationEnabled = false;
 
     std::vector<VkImage> swapchainImages;
     std::vector<VkImageView> swapchainImageViews;
@@ -78,6 +87,11 @@ struct PhysicalDeviceInfo {
     VkPhysicalDeviceProperties properties{};
     VkPhysicalDeviceFeatures2 features{};
     VkPhysicalDeviceVulkan13Features features13{};
+    VkPhysicalDevicePortabilitySubsetFeaturesKHR portabilityFeatures{};
+    VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT divisorFeatures{};
+
+    bool hasPortabilitySubset = false;
+    bool hasVertexAttributeDivisor = false;
 
     DeviceQueueFamilies queueFamilies{};
 };
@@ -92,15 +106,22 @@ struct DeviceState {
 
     VkCommandPool graphicsPool = VK_NULL_HANDLE;
     VkCommandPool computePool = VK_NULL_HANDLE;
+
+    std::shared_ptr<Texture> defaultDepthTexture;
 };
 
 struct CommandBufferState {
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
 
+    VkDevice device = VK_NULL_HANDLE;
+    VkCommandPool commandPool = VK_NULL_HANDLE;
+
     bool recording = false;
     bool rendering = false;
 
     bool needsPresent = false;
+    bool imageAcquired = false;
+    bool submitted = false;
 
     VkSemaphore imageAvailableSemaphore = VK_NULL_HANDLE;
     VkSemaphore renderFinishedSemaphore = VK_NULL_HANDLE;
@@ -163,6 +184,8 @@ struct TextureState {
     glm::vec4 borderColor = glm::vec4(0.0f);
 
     bool ownsImage = false;
+
+    uint64_t generation = 0;
 };
 
 struct ShaderState {
@@ -283,6 +306,10 @@ struct BoundBufferResource {
     VkDeviceSize range = VK_WHOLE_SIZE;
 };
 
+struct BoundImageResource {
+    std::vector<std::shared_ptr<Texture>> textures;
+};
+
 struct RenderTargetSignature {
     std::vector<VkFormat> colorFormats;
 
@@ -329,6 +356,7 @@ struct RenderTargetSignatureHash {
 struct PipelineState {
     std::vector<VkVertexInputBindingDescription> vertexBindings;
     std::vector<VkVertexInputAttributeDescription> vertexAttributes;
+    std::vector<VkVertexInputBindingDivisorDescriptionEXT> vertexDivisors;
 
     VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
     VkPipelineViewportStateCreateInfo viewport{};
@@ -351,6 +379,8 @@ struct PipelineState {
     std::unordered_map<uint64_t, VulkanUniformBlock> uniformBlocks;
 
     std::unordered_map<uint64_t, BoundBufferResource> boundBuffers;
+
+    std::unordered_map<uint64_t, BoundImageResource> boundImages;
 
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> descriptorSets;
@@ -422,8 +452,11 @@ void createSwapchain(ContextState &contextState, DeviceState &deviceState,
                      uint32_t width, uint32_t height);
 void createSwapchainImages(ContextState &contextState,
                            DeviceState &deviceState);
+void destroySwapchain(ContextState &contextState, DeviceState &deviceState);
+bool recreateSwapchain(Context *context, DeviceState &deviceState);
 
 VkFormat textureFormatToVkFormat(TextureFormat format);
+TextureFormat chooseDepthTextureFormat(const DeviceState &deviceState);
 VkImageType textureTypeToVk(TextureType type);
 VkImageAspectFlags textureAspectFlagsFor(TextureFormat format);
 VkImageUsageFlags textureUsageFlagsFor(TextureType type, TextureFormat format);
@@ -464,9 +497,6 @@ VkVertexInputRate vertexBindingRateToVk(VertexBindingInputRate rate);
 
 VkPipeline createOrGetGraphicsPipeline(Pipeline *pipeline,
                                        const RenderTargetSignature &target);
-VkPipeline getVkPipeline(Pipeline *pipeline,
-                         const RenderTargetSignature &target);
-
 void bindPipeline(CommandBuffer *commandBuffer, Pipeline *pipeline,
                   const RenderTargetSignature &target, VkExtent2D renderExtent);
 
@@ -478,10 +508,12 @@ void createBuffer(DeviceState &deviceState, VkDeviceSize size,
                   VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
                   VkBuffer &buffer, VkDeviceMemory &memory);
 void ensureDescriptorSets(Pipeline *pipeline);
-void updateBufferDescriptors(Pipeline *pipeline);
+void updateDescriptors(CommandBuffer *commandBuffer, Pipeline *pipeline);
 void updateVulkanUniform(Pipeline *pipeline, const std::string &name,
                          const void *data, size_t size,
                          bool clampToDeclaredSize);
+void transitionTexture(VkCommandBuffer commandBuffer, TextureState &state,
+                       VkImageLayout newLayout);
 
 RenderTargetSignature
 getRenderTargetSignature(const std::shared_ptr<Framebuffer> &framebuffer,

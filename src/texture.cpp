@@ -432,7 +432,7 @@ size_t textureFormatChannels(TextureFormat format) {
     case TextureFormat::Rgb8:
     case TextureFormat::sRgb8:
     case TextureFormat::Rgb16F:
-        return 3;
+        return 4;
     default:
         return 1;
     }
@@ -732,6 +732,7 @@ void rebuildVulkanSampler(Texture *texture) {
     VULKAN_GUARD(vkCreateSampler(deviceState.device, &samplerInfo, nullptr,
                                  &state.sampler),
                  "Failed to create Vulkan texture sampler");
+    state.generation++;
 }
 
 void destroyVulkanImage(Texture *texture) {
@@ -859,6 +860,9 @@ void createVulkanImage(Texture *texture, int depth) {
                           state.arrayLayers);
     vulkan::endSingleTimeCommands(deviceState, commandBuffer);
     state.layout = finalLayout;
+    if (state.type == TextureType::Texture2DMultisample) {
+        state.generation++;
+    }
 }
 
 void uploadVulkanTexture(Texture *texture, const void *data, int width,
@@ -1695,6 +1699,45 @@ void Pipeline::bindTexture(const std::string &name,
         return;
     }
     state.texturesByUnit[resolvedUnit] = texture;
+#elif VULKAN
+    if (shaderProgram == nullptr) {
+        throw std::runtime_error(
+            "bindTexture requires a Vulkan shader program");
+    }
+    auto &programState = vulkan::programState(shaderProgram.get());
+    auto bindingIt = programState.bindingsByName.find(name);
+    if (bindingIt == programState.bindingsByName.end()) {
+        throw std::runtime_error("Vulkan texture binding not found: " + name);
+    }
+    const auto &binding = bindingIt->second;
+    if (binding.type != vulkan::ShaderResourceType::CombinedImageSampler &&
+        binding.type != vulkan::ShaderResourceType::SampledImage &&
+        binding.type != vulkan::ShaderResourceType::Sampler &&
+        binding.type != vulkan::ShaderResourceType::StorageImage) {
+        throw std::runtime_error(
+            "bindTexture requires an image or sampler binding");
+    }
+    uint32_t arrayElement = 0;
+    if (binding.count > 1) {
+        if (unit < 0 || static_cast<uint32_t>(unit) >= binding.count) {
+            throw std::runtime_error(
+                "Vulkan texture descriptor array index is out of range");
+        }
+        arrayElement = static_cast<uint32_t>(unit);
+    }
+    auto &pipelineState = vulkan::pipelineState(this);
+    uint64_t key = vulkan::bindingKey(binding.set, binding.binding);
+    auto &images = pipelineState.boundImages[key].textures;
+    images.resize(binding.count);
+    images[arrayElement] = texture;
+    if (texture == nullptr &&
+        std::none_of(images.begin(), images.end(),
+                     [](const std::shared_ptr<Texture> &item) {
+                         return item != nullptr;
+                     })) {
+        pipelineState.boundImages.erase(key);
+    }
+    pipelineState.descriptorsDirty = true;
 #endif
 
     if (texture == nullptr) {
@@ -1769,6 +1812,9 @@ void Pipeline::bindTexture2D(const std::string &name, uint textureId, int unit,
 #elif defined(METAL)
     auto texture = metal::getTextureFromHandle(textureId);
     bindTexture(name, texture, unit, callerId);
+#elif VULKAN
+    auto texture = vulkan::getTextureFromHandle(textureId);
+    bindTexture(name, texture, unit, callerId);
 #endif
 }
 
@@ -1784,6 +1830,9 @@ void Pipeline::bindTexture3D(const std::string &name, uint textureId, int unit,
 #elif defined(METAL)
     auto texture = metal::getTextureFromHandle(textureId);
     bindTexture(name, texture, unit, callerId);
+#elif VULKAN
+    auto texture = vulkan::getTextureFromHandle(textureId);
+    bindTexture(name, texture, unit, callerId);
 #endif
 }
 
@@ -1797,6 +1846,9 @@ void Pipeline::bindTextureCubemap(const std::string &name, uint textureId,
     (void)callerId;
 #elif defined(METAL)
     auto texture = metal::getTextureFromHandle(textureId);
+    bindTexture(name, texture, unit, callerId);
+#elif VULKAN
+    auto texture = vulkan::getTextureFromHandle(textureId);
     bindTexture(name, texture, unit, callerId);
 #endif
 }

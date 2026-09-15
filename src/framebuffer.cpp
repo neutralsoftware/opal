@@ -96,6 +96,21 @@ collectDrawColorAttachments(const std::shared_ptr<Framebuffer> &fb,
     return result;
 }
 
+std::shared_ptr<Texture>
+collectDepthAttachment(const std::shared_ptr<Framebuffer> &framebuffer) {
+    if (framebuffer == nullptr) {
+        return nullptr;
+    }
+    for (const auto &attachment : framebuffer->attachments) {
+        if ((attachment.type == Attachment::Type::Depth ||
+             attachment.type == Attachment::Type::DepthStencil) &&
+            attachment.texture != nullptr) {
+            return attachment.texture;
+        }
+    }
+    return nullptr;
+}
+
 } // namespace
 
 #endif
@@ -103,6 +118,8 @@ collectDrawColorAttachments(const std::shared_ptr<Framebuffer> &fb,
 Framebuffer::~Framebuffer() {
 #ifdef METAL
     metal::releaseFramebufferState(this);
+#elif VULKAN
+    vulkan::releaseFramebufferState(this);
 #endif
 }
 
@@ -328,6 +345,30 @@ bool Framebuffer::getStatus() const {
     (void)this;
     return true;
 #elif defined(VULKAN)
+    if (isDefaultFramebuffer) {
+        return true;
+    }
+    if (width <= 0 || height <= 0 || attachments.empty()) {
+        return false;
+    }
+    int samples = -1;
+    for (const auto &attachment : attachments) {
+        if (attachment.texture == nullptr ||
+            attachment.texture->width != width ||
+            attachment.texture->height != height) {
+            return false;
+        }
+        if (samples < 0) {
+            samples = attachment.texture->samples;
+        } else if (samples != attachment.texture->samples) {
+            return false;
+        }
+        const auto &state = vulkan::textureState(attachment.texture.get());
+        if (state.image == VK_NULL_HANDLE ||
+            state.imageView == VK_NULL_HANDLE) {
+            return false;
+        }
+    }
     return true;
 #else
     return false;
@@ -596,6 +637,127 @@ void CommandBuffer::performResolve(
         if (resolvePool != nullptr) {
             resolvePool->release();
             resolvePool = nullptr;
+        }
+    }
+#elif defined(VULKAN)
+    if (action == nullptr || action->source == nullptr ||
+        action->destination == nullptr) {
+        return;
+    }
+    auto &command = vulkan::commandBufferState(this);
+    if (!command.recording) {
+        throw std::runtime_error("performResolve requires command recording");
+    }
+    if (command.rendering) {
+        endPass();
+    }
+
+    auto copyTexture = [&](const std::shared_ptr<Texture> &source,
+                           const std::shared_ptr<Texture> &destination) {
+        auto &sourceState = vulkan::textureState(source.get());
+        auto &destinationState = vulkan::textureState(destination.get());
+        if (sourceState.sampleCount != destinationState.sampleCount ||
+            sourceState.format != destinationState.format) {
+            throw std::runtime_error(
+                "Vulkan texture copy requires matching formats and samples");
+        }
+        VkImageLayout sourceLayout = sourceState.layout;
+        VkImageLayout destinationLayout = destinationState.layout;
+        vulkan::transitionTexture(command.commandBuffer, sourceState,
+                                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        vulkan::transitionTexture(command.commandBuffer, destinationState,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkImageCopy region{};
+        region.srcSubresource.aspectMask = sourceState.aspectMask;
+        region.srcSubresource.layerCount =
+            std::min(sourceState.arrayLayers, destinationState.arrayLayers);
+        region.dstSubresource.aspectMask = destinationState.aspectMask;
+        region.dstSubresource.layerCount = region.srcSubresource.layerCount;
+        region.extent = {std::min(sourceState.width, destinationState.width),
+                         std::min(sourceState.height, destinationState.height),
+                         std::min(sourceState.depth, destinationState.depth)};
+        vkCmdCopyImage(command.commandBuffer, sourceState.image,
+                       sourceState.layout, destinationState.image,
+                       destinationState.layout, 1, &region);
+        vulkan::transitionTexture(command.commandBuffer, sourceState,
+                                  sourceLayout);
+        vulkan::transitionTexture(command.commandBuffer, destinationState,
+                                  destinationLayout);
+    };
+
+    auto resolveTexture = [&](const std::shared_ptr<Texture> &source,
+                              const std::shared_ptr<Texture> &destination,
+                              bool depth) {
+        auto &sourceState = vulkan::textureState(source.get());
+        auto &destinationState = vulkan::textureState(destination.get());
+        if (sourceState.sampleCount == VK_SAMPLE_COUNT_1_BIT ||
+            destinationState.sampleCount != VK_SAMPLE_COUNT_1_BIT ||
+            sourceState.format != destinationState.format) {
+            throw std::runtime_error("Vulkan resolve requires matching "
+                                     "multisample and single-sample textures");
+        }
+        VkImageLayout sourceLayout = sourceState.layout;
+        VkImageLayout destinationLayout = destinationState.layout;
+        VkImageLayout attachmentLayout =
+            depth ? VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL
+                  : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        vulkan::transitionTexture(command.commandBuffer, sourceState,
+                                  attachmentLayout);
+        vulkan::transitionTexture(command.commandBuffer, destinationState,
+                                  attachmentLayout);
+        VkRenderingAttachmentInfo attachment{};
+        attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        attachment.imageView = sourceState.imageView;
+        attachment.imageLayout = attachmentLayout;
+        attachment.resolveMode = depth ? VK_RESOLVE_MODE_SAMPLE_ZERO_BIT
+                                       : VK_RESOLVE_MODE_AVERAGE_BIT;
+        attachment.resolveImageView = destinationState.imageView;
+        attachment.resolveImageLayout = attachmentLayout;
+        attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        VkRenderingInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+        info.renderArea.extent = {
+            std::min(sourceState.width, destinationState.width),
+            std::min(sourceState.height, destinationState.height)};
+        info.layerCount = 1;
+        if (depth) {
+            info.pDepthAttachment = &attachment;
+        } else {
+            info.colorAttachmentCount = 1;
+            info.pColorAttachments = &attachment;
+        }
+        vkCmdBeginRendering(command.commandBuffer, &info);
+        vkCmdEndRendering(command.commandBuffer);
+        vulkan::transitionTexture(command.commandBuffer, sourceState,
+                                  sourceLayout);
+        vulkan::transitionTexture(command.commandBuffer, destinationState,
+                                  destinationLayout);
+    };
+
+    if (action->resolveColor) {
+        auto sources = collectDrawColorAttachments(
+            action->source, action->colorAttachmentIndex);
+        auto destinations = collectDrawColorAttachments(
+            action->destination, action->colorAttachmentIndex);
+        size_t count = std::min(sources.size(), destinations.size());
+        for (size_t index = 0; index < count; ++index) {
+            if (sources[index]->samples > 1) {
+                resolveTexture(sources[index], destinations[index], false);
+            } else {
+                copyTexture(sources[index], destinations[index]);
+            }
+        }
+    }
+    if (action->resolveDepth) {
+        auto source = collectDepthAttachment(action->source);
+        auto destination = collectDepthAttachment(action->destination);
+        if (source != nullptr && destination != nullptr) {
+            if (source->samples > 1) {
+                resolveTexture(source, destination, true);
+            } else {
+                copyTexture(source, destination);
+            }
         }
     }
 #endif

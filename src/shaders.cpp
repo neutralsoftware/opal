@@ -259,7 +259,14 @@ void Shader::compile() {
     state.stage = vulkan::shaderTypeToVk(type);
     state.entryPoint = functionName;
 
-    state.spirv = vulkan::compileSlangToSPIRV(source, type, functionName);
+    state.compiled = false;
+    state.log.clear();
+    try {
+        state.spirv = vulkan::compileSlangToSPIRV(source, type, functionName);
+    } catch (const std::exception &error) {
+        state.log = error.what();
+        throw;
+    }
 
     if (state.spirv.empty()) {
         throw std::runtime_error(
@@ -313,6 +320,13 @@ void Shader::getShaderLog(char *logBuffer, size_t bufferSize) const {
 #elif defined(METAL)
     strncpy(logBuffer, "Metal shader compile status available via exceptions.",
             bufferSize);
+#elif defined(VULKAN)
+    if (logBuffer == nullptr || bufferSize == 0) {
+        return;
+    }
+    const auto &state = vulkan::shaderState(const_cast<Shader *>(this));
+    std::strncpy(logBuffer, state.log.c_str(), bufferSize - 1);
+    logBuffer[bufferSize - 1] = '\0';
 #else
     throw std::runtime_error(
         "Shader log retrieval not implemented for this API");
@@ -489,6 +503,9 @@ void ShaderProgram::link() {
     bool hasVertex = false;
     bool hasFragment = false;
     bool hasCompute = false;
+    bool hasGeometry = false;
+    bool hasTessellationControl = false;
+    bool hasTessellationEvaluation = false;
 
     for (const auto &shader : attachedShaders) {
 
@@ -507,15 +524,47 @@ void ShaderProgram::link() {
 
         switch (shader->type) {
         case ShaderType::Vertex:
+            if (hasVertex) {
+                throw std::runtime_error("Duplicate Vulkan vertex shader");
+            }
             hasVertex = true;
             break;
 
         case ShaderType::Fragment:
+            if (hasFragment) {
+                throw std::runtime_error("Duplicate Vulkan fragment shader");
+            }
             hasFragment = true;
             break;
 
         case ShaderType::Compute:
+            if (hasCompute) {
+                throw std::runtime_error("Duplicate Vulkan compute shader");
+            }
             hasCompute = true;
+            break;
+
+        case ShaderType::Geometry:
+            if (hasGeometry) {
+                throw std::runtime_error("Duplicate Vulkan geometry shader");
+            }
+            hasGeometry = true;
+            break;
+
+        case ShaderType::TessellationControl:
+            if (hasTessellationControl) {
+                throw std::runtime_error(
+                    "Duplicate Vulkan tessellation control shader");
+            }
+            hasTessellationControl = true;
+            break;
+
+        case ShaderType::TessellationEvaluation:
+            if (hasTessellationEvaluation) {
+                throw std::runtime_error(
+                    "Duplicate Vulkan tessellation evaluation shader");
+            }
+            hasTessellationEvaluation = true;
             break;
 
         default:
@@ -532,6 +581,21 @@ void ShaderProgram::link() {
         if (!hasVertex || !hasFragment) {
             throw std::runtime_error(
                 "Vulkan graphics program requires vertex and fragment shaders");
+        }
+        if (hasTessellationControl != hasTessellationEvaluation) {
+            throw std::runtime_error(
+                "Vulkan tessellation control and evaluation shaders must be "
+                "linked together");
+        }
+        if (hasGeometry &&
+            !deviceState.physicalDeviceInfo.features.features.geometryShader) {
+            throw std::runtime_error(
+                "Selected Vulkan device does not support geometry shaders");
+        }
+        if (hasTessellationControl && !deviceState.physicalDeviceInfo.features
+                                           .features.tessellationShader) {
+            throw std::runtime_error(
+                "Selected Vulkan device does not support tessellation shaders");
         }
     }
 
@@ -560,18 +624,28 @@ void ShaderProgram::link() {
                                         other.binding == binding.binding;
                              });
             if (existing != state.bindings.end()) {
-                if (existing->type != binding.type) {
+                if (existing->type != binding.type ||
+                    existing->count != binding.count) {
                     throw std::runtime_error("Vulkan descriptor binding type "
                                              "mismatch between shader stages");
                 }
                 existing->stages |= binding.stages;
+                state.bindingsByName[binding.name] = *existing;
             } else {
                 state.bindings.push_back(binding);
+                state.bindingsByName[binding.name] = binding;
             }
-
-            state.bindingsByName[binding.name] = binding;
         }
     }
+
+    std::sort(state.bindings.begin(), state.bindings.end(),
+              [](const vulkan::ShaderBinding &left,
+                 const vulkan::ShaderBinding &right) {
+                  if (left.set != right.set) {
+                      return left.set < right.set;
+                  }
+                  return left.binding < right.binding;
+              });
 
     uint32_t maxSet = 0;
 

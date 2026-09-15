@@ -458,7 +458,7 @@ void DrawingState::configureAttributes(
     }
 
     glBindVertexArray(0);
-#elif defined(METAL)
+#elif defined(METAL) || defined(VULKAN)
     bool hasInstanceBinding = false;
     for (const auto &binding : bindings) {
         if (binding.attribute.inputRate == VertexBindingInputRate::Instance &&

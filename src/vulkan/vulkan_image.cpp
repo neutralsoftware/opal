@@ -87,6 +87,14 @@ void createSwapchain(ContextState &contextState, DeviceState &deviceState,
     createInfo.imageExtent = chosenExtent;
     createInfo.imageArrayLayers = 1;
     createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    if ((capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT) !=
+        0) {
+        createInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    }
+    if ((capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) !=
+        0) {
+        createInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    }
 
     uint32_t queueFamilyIndices[] = {
         deviceState.physicalDeviceInfo.queueFamilies.graphicsQueueFamilyIndex,
@@ -103,7 +111,18 @@ void createSwapchain(ContextState &contextState, DeviceState &deviceState,
     }
 
     createInfo.preTransform = capabilities.currentTransform;
+    const VkCompositeAlphaFlagBitsKHR compositeAlphaModes[] = {
+        VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+        VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,
+        VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR};
     createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    for (VkCompositeAlphaFlagBitsKHR mode : compositeAlphaModes) {
+        if ((capabilities.supportedCompositeAlpha & mode) != 0) {
+            createInfo.compositeAlpha = mode;
+            break;
+        }
+    }
     createInfo.presentMode = chosenPresentMode;
     createInfo.clipped = VK_TRUE;
     createInfo.oldSwapchain = VK_NULL_HANDLE;
@@ -111,6 +130,12 @@ void createSwapchain(ContextState &contextState, DeviceState &deviceState,
     VULKAN_GUARD(vkCreateSwapchainKHR(deviceState.device, &createInfo, nullptr,
                                       &contextState.swapchain),
                  "Failed to create swapchain");
+
+    contextState.swapchainImageFormat = chosenFormat.format;
+    contextState.swapchainColorSpace = chosenFormat.colorSpace;
+    contextState.swapchainPresentMode = chosenPresentMode;
+    contextState.swapchainExtent = chosenExtent;
+    contextState.currentSwapchainImageIndex = UINT32_MAX;
 }
 
 void createSwapchainImages(ContextState &contextState,
@@ -153,6 +178,52 @@ void createSwapchainImages(ContextState &contextState,
     }
 }
 
+void destroySwapchain(ContextState &contextState, DeviceState &deviceState) {
+    if (deviceState.device == VK_NULL_HANDLE) {
+        return;
+    }
+    for (VkImageView imageView : contextState.swapchainImageViews) {
+        if (imageView != VK_NULL_HANDLE) {
+            vkDestroyImageView(deviceState.device, imageView, nullptr);
+        }
+    }
+    contextState.swapchainImageViews.clear();
+    contextState.swapchainImages.clear();
+    contextState.swapchainImageLayouts.clear();
+    if (contextState.swapchain != VK_NULL_HANDLE) {
+        vkDestroySwapchainKHR(deviceState.device, contextState.swapchain,
+                              nullptr);
+        contextState.swapchain = VK_NULL_HANDLE;
+    }
+    contextState.currentSwapchainImageIndex = UINT32_MAX;
+    contextState.swapchainExtent = {};
+}
+
+bool recreateSwapchain(Context *context, DeviceState &deviceState) {
+    if (context == nullptr || context->window == nullptr ||
+        deviceState.device == VK_NULL_HANDLE) {
+        return false;
+    }
+    int width = 0;
+    int height = 0;
+    SDL_GetWindowSizeInPixels(context->window, &width, &height);
+    if (width <= 0 || height <= 0) {
+        return false;
+    }
+    VULKAN_GUARD(vkDeviceWaitIdle(deviceState.device),
+                 "Failed waiting for Vulkan device before swapchain rebuild");
+    auto &state = contextState(context);
+    destroySwapchain(state, deviceState);
+    createSwapchain(state, deviceState, static_cast<uint32_t>(width),
+                    static_cast<uint32_t>(height));
+    createSwapchainImages(state, deviceState);
+    deviceState.defaultDepthTexture = Texture::create(
+        TextureType::Texture2D, chooseDepthTextureFormat(deviceState),
+        state.swapchainExtent.width, state.swapchainExtent.height,
+        TextureDataFormat::DepthComponent, nullptr, 1);
+    return true;
+}
+
 VkFormat textureFormatToVkFormat(TextureFormat format) {
     switch (format) {
     case opal::TextureFormat::Red8:
@@ -168,11 +239,11 @@ VkFormat textureFormatToVkFormat(TextureFormat format) {
     case opal::TextureFormat::Rgba16F:
         return VK_FORMAT_R16G16B16A16_SFLOAT;
     case opal::TextureFormat::Rgb8:
-        return VK_FORMAT_R8G8B8_UNORM;
+        return VK_FORMAT_R8G8B8A8_UNORM;
     case opal::TextureFormat::Rgb16F:
-        return VK_FORMAT_R16G16B16_SFLOAT;
+        return VK_FORMAT_R16G16B16A16_SFLOAT;
     case opal::TextureFormat::sRgb8:
-        return VK_FORMAT_R8G8B8_SRGB;
+        return VK_FORMAT_R8G8B8A8_SRGB;
     case opal::TextureFormat::sRgba8:
         return VK_FORMAT_R8G8B8A8_SRGB;
     case opal::TextureFormat::DepthComponent24:
@@ -180,6 +251,23 @@ VkFormat textureFormatToVkFormat(TextureFormat format) {
     default:
         throw std::runtime_error("Unsupported texture format for Vulkan");
     }
+}
+
+TextureFormat chooseDepthTextureFormat(const DeviceState &deviceState) {
+    const TextureFormat candidates[] = {TextureFormat::Depth32F,
+                                        TextureFormat::DepthComponent24,
+                                        TextureFormat::Depth24Stencil8};
+    for (TextureFormat candidate : candidates) {
+        VkFormatProperties properties{};
+        vkGetPhysicalDeviceFormatProperties(
+            deviceState.physicalDeviceInfo.device,
+            textureFormatToVkFormat(candidate), &properties);
+        if ((properties.optimalTilingFeatures &
+             VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0) {
+            return candidate;
+        }
+    }
+    throw std::runtime_error("No supported Vulkan depth format found");
 }
 
 VkImageType textureTypeToVk(TextureType type) {
@@ -272,6 +360,13 @@ getRenderTargetSignature(const std::shared_ptr<Framebuffer> &framebuffer,
         signature.depthFormat = VK_FORMAT_UNDEFINED;
         signature.stencilFormat = VK_FORMAT_UNDEFINED;
         signature.samples = VK_SAMPLE_COUNT_1_BIT;
+
+        auto &deviceState = vulkan::deviceState(device);
+        if (deviceState.defaultDepthTexture != nullptr) {
+            auto &depth =
+                vulkan::textureState(deviceState.defaultDepthTexture.get());
+            signature.depthFormat = depth.format;
+        }
 
         return signature;
     }

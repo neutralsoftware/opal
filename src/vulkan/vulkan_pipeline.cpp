@@ -7,11 +7,12 @@
 // Copyright (c) 2026 Max Van den Eynde
 //
 
-#include "slang/external/vulkan/include/vulkan/vulkan_core.h"
 #ifdef VULKAN
 #include "diagnostics.h"
 #include "opal/opal.h"
 #include "vulkan_state.h"
+#include <algorithm>
+#include <cstring>
 #include <vulkan/vulkan.h>
 
 namespace opal::vulkan {
@@ -286,17 +287,6 @@ VkFormat vertexAttributeFormatToVk(VertexAttributeType type, uint size,
     }
 }
 
-VkVertexInputRate vertexBindingInputRateToVk(VertexBindingInputRate inputRate) {
-    switch (inputRate) {
-    case VertexBindingInputRate::Vertex:
-        return VK_VERTEX_INPUT_RATE_VERTEX;
-    case VertexBindingInputRate::Instance:
-        return VK_VERTEX_INPUT_RATE_INSTANCE;
-    default:
-        return VK_VERTEX_INPUT_RATE_VERTEX;
-    }
-}
-
 VkPipeline createOrGetGraphicsPipeline(Pipeline *pipeline,
                                        const RenderTargetSignature &target) {
     if (pipeline == nullptr) {
@@ -341,6 +331,16 @@ VkPipeline createOrGetGraphicsPipeline(Pipeline *pipeline,
     vertexInput.pVertexAttributeDescriptions =
         state.vertexAttributes.empty() ? nullptr
                                        : state.vertexAttributes.data();
+
+    VkPipelineVertexInputDivisorStateCreateInfoEXT divisorInfo{};
+    if (!state.vertexDivisors.empty()) {
+        divisorInfo.sType =
+            VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO_EXT;
+        divisorInfo.vertexBindingDivisorCount =
+            static_cast<uint32_t>(state.vertexDivisors.size());
+        divisorInfo.pVertexBindingDivisors = state.vertexDivisors.data();
+        vertexInput.pNext = &divisorInfo;
+    }
 
     VkPipelineDynamicStateCreateInfo dynamicInfo{};
     dynamicInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
@@ -407,22 +407,6 @@ VkPipeline createOrGetGraphicsPipeline(Pipeline *pipeline,
     return vkPipeline;
 }
 
-VkPipeline getVkPipeline(Pipeline *pipeline,
-                         const RenderTargetSignature *target) {
-    auto &state = pipelineState(pipeline);
-
-    if (pipeline->shaderProgram->isComputeProgram()) {
-        return state.computePipeline;
-    }
-
-    if (target == nullptr) {
-        throw std::runtime_error(
-            "Graphics pipeline requires render target signature");
-    }
-
-    return createOrGetGraphicsPipeline(pipeline, *target);
-}
-
 void bindPipeline(CommandBuffer *commandBuffer, Pipeline *pipeline,
                   const RenderTargetSignature &target,
                   VkExtent2D renderExtent) {
@@ -467,7 +451,7 @@ void bindPipeline(CommandBuffer *commandBuffer, Pipeline *pipeline,
     vkCmdBindPipeline(cmdState.commandBuffer, bindPoint, vkPipeline);
 
     ensureDescriptorSets(pipeline);
-    updateBufferDescriptors(pipeline);
+    updateDescriptors(commandBuffer, pipeline);
 
     if (!pipelineState.descriptorSets.empty()) {
         vkCmdBindDescriptorSets(
@@ -484,8 +468,6 @@ void bindPipeline(CommandBuffer *commandBuffer, Pipeline *pipeline,
     if (!compute) {
         applyDynamicPipelineState(commandBuffer, pipeline, renderExtent);
     }
-
-    // Descriptor handling comes here.
 }
 
 void applyDynamicPipelineState(CommandBuffer *commandBuffer, Pipeline *pipeline,
@@ -586,62 +568,134 @@ void ensureDescriptorSets(Pipeline *pipeline) {
     state.descriptorsDirty = true;
 }
 
-void updateBufferDescriptors(Pipeline *pipeline) {
+void updateDescriptors(CommandBuffer *commandBuffer, Pipeline *pipeline) {
     auto &state = pipelineState(pipeline);
-    if (!state.descriptorsDirty) {
+    auto &program = programState(pipeline->shaderProgram.get());
+    auto &device = deviceState(Device::globalInstance);
+    auto &command = commandBufferState(commandBuffer);
+
+    for (auto &[key, block] : state.uniformBlocks) {
+        if (!block.dirty || block.buffers.empty() ||
+            block.buffers[0] == nullptr) {
+            continue;
+        }
+        block.buffers[0]->updateData(0, block.data.size(), block.data.data());
+        block.dirty = false;
+    }
+
+    if (!state.descriptorsAllocated) {
         return;
     }
 
-    auto &program = programState(pipeline->shaderProgram.get());
-    auto &device = deviceState(Device::globalInstance);
-
     std::vector<VkDescriptorBufferInfo> bufferInfos;
+    std::vector<VkDescriptorImageInfo> imageInfos;
     std::vector<VkWriteDescriptorSet> writes;
 
-    bufferInfos.reserve(state.boundBuffers.size());
-    writes.reserve(state.boundBuffers.size());
+    size_t descriptorCount = 0;
+    for (const auto &binding : program.bindings) {
+        descriptorCount += binding.count;
+    }
+    bufferInfos.reserve(descriptorCount);
+    imageInfos.reserve(descriptorCount);
+    writes.reserve(program.bindings.size());
 
     for (const auto &binding : program.bindings) {
-        if (binding.type != ShaderResourceType::UniformBuffer &&
-            binding.type != ShaderResourceType::StorageBuffer) {
-            continue;
-        }
-
         uint64_t key = bindingKey(binding.set, binding.binding);
-
-        auto resourceIt = state.boundBuffers.find(key);
-        if (resourceIt == state.boundBuffers.end()) {
+        if (binding.type == ShaderResourceType::UniformBuffer ||
+            binding.type == ShaderResourceType::StorageBuffer) {
+            auto resourceIt = state.boundBuffers.find(key);
+            if (resourceIt == state.boundBuffers.end() ||
+                resourceIt->second.buffer == nullptr) {
+                continue;
+            }
+            const BoundBufferResource &resource = resourceIt->second;
+            auto &buffer = bufferState(resource.buffer.get());
+            if (buffer.buffer == VK_NULL_HANDLE ||
+                resource.offset >= buffer.size) {
+                throw std::runtime_error(
+                    "Invalid Vulkan buffer descriptor range");
+            }
+            VkDeviceSize range = resource.range;
+            if (range == VK_WHOLE_SIZE) {
+                range = buffer.size - resource.offset;
+            }
+            const size_t firstInfo = bufferInfos.size();
+            for (uint32_t index = 0; index < binding.count; ++index) {
+                bufferInfos.push_back({.buffer = buffer.buffer,
+                                       .offset = resource.offset,
+                                       .range = range});
+            }
+            writes.push_back(
+                {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                 .pNext = nullptr,
+                 .dstSet = state.descriptorSets.at(binding.set),
+                 .dstBinding = binding.binding,
+                 .dstArrayElement = 0,
+                 .descriptorCount = binding.count,
+                 .descriptorType = descriptorTypeToVk(binding.type),
+                 .pImageInfo = nullptr,
+                 .pBufferInfo = &bufferInfos[firstInfo],
+                 .pTexelBufferView = nullptr});
             continue;
         }
 
-        const BoundBufferResource &resource = resourceIt->second;
-        if (!resource.buffer) {
+        auto imageIt = state.boundImages.find(key);
+        if (imageIt == state.boundImages.end() ||
+            imageIt->second.textures.empty()) {
             continue;
         }
-
-        auto &buffer = bufferState(resource.buffer.get());
-        VkDeviceSize range = resource.range;
-        if (range == VK_WHOLE_SIZE) {
-            range = buffer.size - resource.offset;
+        auto fallback = std::find_if(
+            imageIt->second.textures.begin(), imageIt->second.textures.end(),
+            [](const std::shared_ptr<Texture> &texture) {
+                return texture != nullptr;
+            });
+        if (fallback == imageIt->second.textures.end()) {
+            continue;
         }
-
-        bufferInfos.push_back({.buffer = buffer.buffer,
-                               .offset = resource.offset,
-                               .range = range});
-
-        VkWriteDescriptorSet write{
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .pNext = nullptr,
-            .dstSet = state.descriptorSets.at(binding.set),
-            .dstBinding = binding.binding,
-            .dstArrayElement = 0,
-            .descriptorCount = 1,
-            .descriptorType = descriptorTypeToVk(binding.type),
-            .pImageInfo = nullptr,
-            .pBufferInfo = &bufferInfos.back(),
-            .pTexelBufferView = nullptr};
-
-        writes.push_back(write);
+        const size_t firstInfo = imageInfos.size();
+        for (uint32_t index = 0; index < binding.count; ++index) {
+            const std::shared_ptr<Texture> &texture =
+                index < imageIt->second.textures.size() &&
+                        imageIt->second.textures[index] != nullptr
+                    ? imageIt->second.textures[index]
+                    : *fallback;
+            auto &textureState = vulkan::textureState(texture.get());
+            const bool usesImage = binding.type != ShaderResourceType::Sampler;
+            const bool usesSampler =
+                binding.type == ShaderResourceType::Sampler ||
+                binding.type == ShaderResourceType::CombinedImageSampler;
+            if (usesImage && textureState.imageView == VK_NULL_HANDLE) {
+                throw std::runtime_error(
+                    "Vulkan texture descriptor has no image view");
+            }
+            if (usesSampler && textureState.sampler == VK_NULL_HANDLE) {
+                throw std::runtime_error(
+                    "Vulkan texture descriptor has no sampler");
+            }
+            VkImageLayout layout =
+                binding.type == ShaderResourceType::StorageImage
+                    ? VK_IMAGE_LAYOUT_GENERAL
+                    : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            if (usesImage) {
+                transitionTexture(command.commandBuffer, textureState, layout);
+            }
+            imageInfos.push_back(
+                {.sampler = usesSampler ? textureState.sampler : VK_NULL_HANDLE,
+                 .imageView =
+                     usesImage ? textureState.imageView : VK_NULL_HANDLE,
+                 .imageLayout =
+                     usesImage ? layout : VK_IMAGE_LAYOUT_UNDEFINED});
+        }
+        writes.push_back({.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                          .pNext = nullptr,
+                          .dstSet = state.descriptorSets.at(binding.set),
+                          .dstBinding = binding.binding,
+                          .dstArrayElement = 0,
+                          .descriptorCount = binding.count,
+                          .descriptorType = descriptorTypeToVk(binding.type),
+                          .pImageInfo = &imageInfos[firstInfo],
+                          .pBufferInfo = nullptr,
+                          .pTexelBufferView = nullptr});
     }
 
     if (!writes.empty()) {
