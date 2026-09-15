@@ -1583,7 +1583,11 @@ void CommandBuffer::beginPass(std::shared_ptr<RenderPass> newRenderPass) {
             dependency.imageMemoryBarrierCount = 1;
             dependency.pImageMemoryBarriers = &barrier;
 
-            vkCmdPipelineBarrier2(state.commandBuffer, &dependency);
+            if (contextState.apiVersion >= VK_API_VERSION_1_3) {
+                vkCmdPipelineBarrier2(state.commandBuffer, &dependency);
+            } else {
+                vkCmdPipelineBarrier2KHR(state.commandBuffer, &dependency);
+            }
 
             if (state.imageIndex < contextState.swapchainImageLayouts.size()) {
 

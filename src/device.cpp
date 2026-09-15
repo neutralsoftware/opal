@@ -9,7 +9,6 @@
 
 #include "diagnostics.h"
 #include "opal/opal.h"
-#include "slang/external/vulkan/include/vulkan/vulkan_core.h"
 #include "windowing.h"
 #include <algorithm>
 #include <cmath>
@@ -200,6 +199,13 @@ std::shared_ptr<Context> Context::create(ContextConfiguration config) {
     appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
     appInfo.pEngineName = "Atlas Engine";
     appInfo.engineVersion = VK_MAKE_VERSION(0, 1, 0);
+    uint32_t supportedVersion = VK_API_VERSION_1_2;
+
+    vkEnumerateInstanceVersion(&supportedVersion);
+
+    uint32_t requestedVersion = std::min(supportedVersion, VK_API_VERSION_1_3);
+    appInfo.apiVersion = requestedVersion;
+    vulkanState.apiVersion = requestedVersion;
 
     VkInstanceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;

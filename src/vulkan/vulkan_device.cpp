@@ -120,11 +120,13 @@ DeviceQueueFamilies findQueueFamilies(VkPhysicalDevice device,
     uint32_t queueFamilyCount = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount,
                                              nullptr);
+
     std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+
     vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount,
                                              queueFamilies.data());
 
-    DeviceQueueFamilies deviceQueueFamilies;
+    DeviceQueueFamilies result;
 
     for (uint32_t i = 0; i < queueFamilyCount; ++i) {
         VkBool32 presentSupport = VK_FALSE;
@@ -138,28 +140,29 @@ DeviceQueueFamilies findQueueFamilies(VkPhysicalDevice device,
         const bool computeSupport =
             queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT;
 
-        if (graphicsSupport && presentSupport) {
-            deviceQueueFamilies.graphicsQueueFamilyIndex = i;
-            deviceQueueFamilies.presentQueueFamilyIndex = i;
-        } else {
-            if (graphicsSupport &&
-                deviceQueueFamilies.graphicsQueueFamilyIndex == UINT32_MAX) {
-                deviceQueueFamilies.graphicsQueueFamilyIndex = i;
-            }
-
-            if (presentSupport &&
-                deviceQueueFamilies.presentQueueFamilyIndex == UINT32_MAX) {
-                deviceQueueFamilies.presentQueueFamilyIndex = i;
-            }
+        if (graphicsSupport && result.graphicsQueueFamilyIndex == UINT32_MAX) {
+            result.graphicsQueueFamilyIndex = i;
         }
 
-        if (computeSupport && !graphicsSupport &&
-            deviceQueueFamilies.computeQueueFamilyIndex == UINT32_MAX) {
-            deviceQueueFamilies.computeQueueFamilyIndex = i;
+        if (presentSupport && result.presentQueueFamilyIndex == UINT32_MAX) {
+            result.presentQueueFamilyIndex = i;
+        }
+
+        if (computeSupport && !graphicsSupport) {
+            result.computeQueueFamilyIndex = i;
         }
     }
 
-    return deviceQueueFamilies;
+    if (result.computeQueueFamilyIndex == UINT32_MAX) {
+        for (uint32_t i = 0; i < queueFamilyCount; ++i) {
+            if (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
+                result.computeQueueFamilyIndex = i;
+                break;
+            }
+        }
+    }
+
+    return result;
 }
 
 PhysicalDeviceInfo buildQueuesAndPhysicalDevice(VkInstance instance,

@@ -50,6 +50,8 @@ struct ContextState {
     VkPresentModeKHR swapchainPresentMode{};
     VkExtent2D swapchainExtent{};
 
+    uint32_t apiVersion = VK_API_VERSION_1_0;
+
     std::vector<VkImage> swapchainImages;
     std::vector<VkImageView> swapchainImageViews;
 
