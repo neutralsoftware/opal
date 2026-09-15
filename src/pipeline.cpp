@@ -372,12 +372,6 @@ void Pipeline::setPrimitiveStyle(PrimitiveStyle style) {
 void Pipeline::setPatchVertices(int count) {
     this->patchVertices = count;
     this->primitiveStyle = PrimitiveStyle::Patches;
-
-#ifdef VULKAN
-    auto &state = vulkan::pipelineState(this);
-    state.hasTessellation = true;
-    state.tessellation.patchControlPoints = static_cast<uint32_t>(count);
-#endif
 }
 
 void Pipeline::setViewport(int x, int y, int width, int height) {
@@ -716,6 +710,18 @@ void Pipeline::build() {
     }
     auto &device = vulkan::deviceState(Device::globalInstance);
 
+    state.vertexBindings.clear();
+    state.vertexAttributes.clear();
+
+    state.inputAssembly = {};
+    state.viewport = {};
+    state.rasterization = {};
+    state.depthStencil = {};
+    state.tessellation = {};
+    state.colorBlendAttachment = {};
+
+    state.hasTessellation = false;
+
     if (shaderProgram->isComputeProgram()) {
         const VkPipelineShaderStageCreateInfo *computeStage = nullptr;
         for (const auto &stage : program.shaderStages) {
@@ -775,7 +781,7 @@ void Pipeline::build() {
         if (hasInstanceAttributes) {
             VkVertexInputBindingDescription instanceBindingDescription{
                 .binding = 1,
-                .stride = static_cast<uint32_t>(vertexBinding.stride),
+                .stride = instanceStride,
                 .inputRate = VK_VERTEX_INPUT_RATE_INSTANCE};
             state.vertexBindings.push_back(instanceBindingDescription);
         }
@@ -822,6 +828,8 @@ void Pipeline::build() {
         state.rasterization.frontFace = vulkan::frontFaceToVk(frontFace);
         state.rasterization.depthBiasEnable =
             polygonOffsetEnabled ? VK_TRUE : VK_FALSE;
+        state.rasterization.polygonMode =
+            vulkan::rasterizerModeToVk(rasterizerMode);
         state.rasterization.lineWidth = 1.0;
 
         state.depthStencil.sType =
@@ -849,6 +857,21 @@ void Pipeline::build() {
             vulkan::blenderFuncToVk(blendDstFactor);
         state.colorBlendAttachment.alphaBlendOp =
             vulkan::blenderOpToVk(blendEquation);
+
+        state.colorBlendAttachment.colorWriteMask =
+            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+        if (primitiveStyle == PrimitiveStyle::Patches) {
+            state.hasTessellation = true;
+
+            state.tessellation = {};
+            state.tessellation.sType =
+                VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+
+            state.tessellation.patchControlPoints =
+                static_cast<uint32_t>(patchVertices);
+        }
 
         state.built = true;
     }
@@ -962,6 +985,17 @@ void Pipeline::bind() {
     state.depthTestEnabled = this->depthTestEnabled;
     state.depthWriteEnabled = this->depthWriteEnabled;
     state.depthCompare = desiredDepthCompare;
+#elif VULKAN
+    auto &state = vulkan::pipelineState(this);
+
+    if (!state.built) {
+        throw std::runtime_error(
+            "Pipeline::bind() called before Pipeline::build()");
+    }
+
+    if (shaderProgram == nullptr) {
+        throw std::runtime_error("Pipeline::bind() requires a shader program");
+    }
 #endif
 }
 

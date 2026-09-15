@@ -94,6 +94,10 @@ VkPrimitiveTopology primitiveStyleToVk(PrimitiveStyle style) {
         return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     case PrimitiveStyle::TriangleStrip:
         return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+    case PrimitiveStyle::TriangleFan:
+        return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
+    case PrimitiveStyle::Patches:
+        return VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
     default:
         return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     }
@@ -293,8 +297,8 @@ VkVertexInputRate vertexBindingInputRateToVk(VertexBindingInputRate inputRate) {
     }
 }
 
-VkPipeline createOrGetPipeline(Pipeline *pipeline,
-                               const RenderTargetSignature &target) {
+VkPipeline createOrGetGraphicsPipeline(Pipeline *pipeline,
+                                       const RenderTargetSignature &target) {
     if (pipeline == nullptr) {
         throw std::runtime_error("Pipeline pointer is null");
     }
@@ -401,6 +405,95 @@ VkPipeline createOrGetPipeline(Pipeline *pipeline,
     state.graphicsPipelines.emplace(target, vkPipeline);
 
     return vkPipeline;
+}
+
+VkPipeline getVkPipeline(Pipeline *pipeline,
+                         const RenderTargetSignature *target) {
+    auto &state = pipelineState(pipeline);
+
+    if (pipeline->shaderProgram->isComputeProgram()) {
+        return state.computePipeline;
+    }
+
+    if (target == nullptr) {
+        throw std::runtime_error(
+            "Graphics pipeline requires render target signature");
+    }
+
+    return createOrGetGraphicsPipeline(pipeline, *target);
+}
+
+void bindPipeline(CommandBuffer *commandBuffer, Pipeline *pipeline,
+                  const RenderTargetSignature &target,
+                  VkExtent2D renderExtent) {
+    if (commandBuffer == nullptr || pipeline == nullptr) {
+        throw std::runtime_error("Invalid Vulkan pipeline binding");
+    }
+
+    auto &commandState = commandBufferState(commandBuffer);
+
+    auto &pipelineState = vulkan::pipelineState(pipeline);
+
+    if (!pipelineState.built) {
+        pipeline->build();
+    }
+
+    const bool compute = pipeline->shaderProgram->isComputeProgram();
+
+    VkPipelineBindPoint bindPoint = compute ? VK_PIPELINE_BIND_POINT_COMPUTE
+                                            : VK_PIPELINE_BIND_POINT_GRAPHICS;
+
+    VkPipeline vkPipeline = compute
+                                ? pipelineState.computePipeline
+                                : createOrGetGraphicsPipeline(pipeline, target);
+
+    vkCmdBindPipeline(commandState.commandBuffer, bindPoint, vkPipeline);
+
+    commandState.activePipeline = pipeline;
+
+    commandState.boundPipeline = vkPipeline;
+
+    commandState.boundPipelineBindPoint = bindPoint;
+}
+
+void applyDynamicPipelineState(CommandBuffer *commandBuffer, Pipeline *pipeline,
+                               VkExtent2D renderExtent) {
+    auto &state = commandBufferState(commandBuffer);
+
+    if (pipeline->shaderProgram->isComputeProgram()) {
+        return;
+    }
+
+    VkViewport viewport{};
+
+    viewport.x = static_cast<float>(pipeline->viewportX);
+
+    viewport.y = static_cast<float>(pipeline->viewportY);
+
+    viewport.width = pipeline->viewportWidth > 0
+                         ? static_cast<float>(pipeline->viewportWidth)
+                         : static_cast<float>(renderExtent.width);
+
+    viewport.height = pipeline->viewportHeight > 0
+                          ? static_cast<float>(pipeline->viewportHeight)
+                          : static_cast<float>(renderExtent.height);
+
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+
+    vkCmdSetViewport(state.commandBuffer, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+
+    scissor.offset = {0, 0};
+    scissor.extent = renderExtent;
+
+    vkCmdSetScissor(state.commandBuffer, 0, 1, &scissor);
+
+    if (pipeline->polygonOffsetEnabled) {
+        vkCmdSetDepthBias(state.commandBuffer, pipeline->polygonOffsetUnits,
+                          0.0f, pipeline->polygonOffsetFactor);
+    }
 }
 
 } // namespace opal::vulkan

@@ -107,6 +107,14 @@ struct CommandBufferState {
     bool clearColorPending = false;
     bool clearDepthPending = false;
 
+    Pipeline *activePipeline = nullptr;
+
+    VkPipeline boundPipeline = VK_NULL_HANDLE;
+
+    VkPipelineLayout boundPipelineLayout = VK_NULL_HANDLE;
+    VkPipelineBindPoint boundPipelineBindPoint =
+        VK_PIPELINE_BIND_POINT_GRAPHICS;
+
     uint32_t imageIndex = UINT32_MAX;
 };
 
@@ -428,8 +436,16 @@ VkFormat vertexAttributeFormatToVk(VertexAttributeType type, uint size,
 
 VkVertexInputRate vertexBindingRateToVk(VertexBindingInputRate rate);
 
-VkPipeline createOrGetPipeline(Pipeline *pipeline,
-                               const RenderTargetSignature &target);
+VkPipeline createOrGetGraphicsPipeline(Pipeline *pipeline,
+                                       const RenderTargetSignature &target);
+VkPipeline getVkPipeline(Pipeline *pipeline,
+                         const RenderTargetSignature &target);
+
+void bindPipeline(CommandBuffer *commandBuffer, Pipeline *pipeline,
+                  const RenderTargetSignature &target, VkExtent2D renderExtent);
+
+void applyDynamicPipelineState(CommandBuffer *commandBuffer, Pipeline *pipeline,
+                               VkExtent2D renderExtent);
 
 } // namespace opal::vulkan
 

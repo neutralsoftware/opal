@@ -608,6 +608,15 @@ class Pipeline {
 
     bool multisamplingEnabled = false;
 
+    int viewportX = 0;
+    int viewportY = 0;
+    int viewportWidth = 0;
+    int viewportHeight = 0;
+
+    bool polygonOffsetEnabled = false;
+    float polygonOffsetFactor = 0.0f;
+    float polygonOffsetUnits = 0.0f;
+
   private:
     PrimitiveStyle primitiveStyle = PrimitiveStyle::Triangles;
     int patchVertices = 4; // Default patch size for tessellation
@@ -622,19 +631,13 @@ class Pipeline {
     bool depthTestEnabled = false;
     bool depthWriteEnabled = true;
     CompareOp depthCompareOp = CompareOp::Less;
-    bool polygonOffsetEnabled = false;
-    float polygonOffsetFactor = 0.0f;
-    float polygonOffsetUnits = 0.0f;
+
     float lineWidth = 1.0f;
     std::vector<int> enabledClipDistances;
 
     std::vector<VertexAttribute> vertexAttributes;
     VertexBinding vertexBinding;
 
-    int viewportX = 0;
-    int viewportY = 0;
-    int viewportWidth = 0;
-    int viewportHeight = 0;
     uint computeThreadgroupX = 8;
     uint computeThreadgroupY = 8;
     uint computeThreadgroupZ = 1;
