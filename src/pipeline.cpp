@@ -9,6 +9,7 @@
 
 #include "diagnostics.h"
 #include "opal/opal.h"
+#include "slang/external/vulkan/include/vulkan/vulkan_core.h"
 #include <algorithm>
 #include <cstring>
 #include <glad/glad.h>
@@ -20,9 +21,11 @@
 #ifdef METAL
 #include "metal_state.h"
 #endif
+#ifdef VULKAN
+#include "vulkan_state.h"
+#endif
 
 namespace opal {
-
 
 #ifdef METAL
 namespace {
@@ -351,7 +354,6 @@ Pipeline::~Pipeline() {
 #endif
 }
 
-
 void Pipeline::setShaderProgram(std::shared_ptr<ShaderProgram> program) {
     this->shaderProgram = std::move(program);
 }
@@ -367,7 +369,16 @@ void Pipeline::setPrimitiveStyle(PrimitiveStyle style) {
     this->primitiveStyle = style;
 }
 
-void Pipeline::setPatchVertices(int count) { this->patchVertices = count; }
+void Pipeline::setPatchVertices(int count) {
+    this->patchVertices = count;
+    this->primitiveStyle = PrimitiveStyle::Patches;
+
+#ifdef VULKAN
+    auto &state = vulkan::pipelineState(this);
+    state.hasTessellation = true;
+    state.tessellation.patchControlPoints = static_cast<uint32_t>(count);
+#endif
+}
 
 void Pipeline::setViewport(int x, int y, int width, int height) {
     this->viewportX = x;
@@ -690,6 +701,157 @@ void Pipeline::build() {
     state.depthTestEnabled = this->depthTestEnabled;
     state.depthWriteEnabled = this->depthWriteEnabled;
     state.depthCompare = desiredDepthCompare;
+#elif VULKAN
+    auto &state = vulkan::pipelineState(this);
+    if (Device::globalInstance == nullptr) {
+        throw std::runtime_error("Cannot build Vulkan pipeline without device");
+    }
+    if (shaderProgram == nullptr) {
+        throw std::runtime_error("Pipeline::build() requires a shader program");
+    }
+    auto &program = vulkan::programState(shaderProgram.get());
+    if (!program.linked) {
+        throw std::runtime_error(
+            "Pipeline::build() requires a linked shader program");
+    }
+    auto &device = vulkan::deviceState(Device::globalInstance);
+
+    if (shaderProgram->isComputeProgram()) {
+        const VkPipelineShaderStageCreateInfo *computeStage = nullptr;
+        for (const auto &stage : program.shaderStages) {
+            if (stage.stage == VK_SHADER_STAGE_COMPUTE_BIT) {
+                computeStage = &stage;
+                break;
+            }
+        }
+
+        if (computeStage == nullptr) {
+            throw std::runtime_error(
+                "Pipeline::build() requires a compute shader stage");
+        }
+
+        VkComputePipelineCreateInfo computePipelineInfo{};
+        computePipelineInfo.sType =
+            VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        computePipelineInfo.stage = *computeStage;
+        computePipelineInfo.layout = program.pipelineLayout;
+
+        computePipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
+        computePipelineInfo.basePipelineIndex = -1;
+
+        VULKAN_GUARD(vkCreateComputePipelines(device.device, VK_NULL_HANDLE, 1,
+                                              &computePipelineInfo, nullptr,
+                                              &state.computePipeline),
+                     "Failed to create Vulkan compute pipeline");
+
+        state.built = true;
+        return;
+    } else {
+        VkVertexInputBindingDescription bindingDescription{
+            .binding = 0,
+            .stride = static_cast<uint32_t>(vertexBinding.stride),
+            .inputRate =
+                vulkan::vertexBindingRateToVk(vertexBinding.inputRate)};
+
+        bool hasInstanceAttributes = false;
+        uint32_t instanceStride = 0;
+
+        for (const auto &attribute : vertexAttributes) {
+            if (attribute.inputRate != VertexBindingInputRate::Instance) {
+                continue;
+            }
+
+            hasInstanceAttributes = true;
+
+            instanceStride = std::max(instanceStride,
+                                      static_cast<uint32_t>(attribute.stride));
+
+            if (attribute.divisor > 1) {
+                throw std::runtime_error(
+                    "Vulkan instance divisor > 1 is not implemented yet");
+            }
+        }
+        state.vertexBindings = {bindingDescription};
+        if (hasInstanceAttributes) {
+            VkVertexInputBindingDescription instanceBindingDescription{
+                .binding = 1,
+                .stride = static_cast<uint32_t>(vertexBinding.stride),
+                .inputRate = VK_VERTEX_INPUT_RATE_INSTANCE};
+            state.vertexBindings.push_back(instanceBindingDescription);
+        }
+
+        for (VertexAttribute &attribute : vertexAttributes) {
+            VkVertexInputAttributeDescription attributeDescription{
+                .location = static_cast<uint32_t>(attribute.location),
+                .binding = static_cast<uint32_t>(
+                    attribute.inputRate == VertexBindingInputRate::Instance
+                        ? 1
+                        : 0),
+                .format = vulkan::vertexAttributeFormatToVk(
+                    attribute.type, attribute.size, attribute.normalized),
+                .offset = static_cast<uint32_t>(attribute.offset)};
+            state.vertexAttributes.push_back(attributeDescription);
+        }
+
+        state.inputAssembly.sType =
+            VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        state.inputAssembly.topology =
+            vulkan::primitiveStyleToVk(primitiveStyle);
+        state.inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+        state.dynamicStates = {VK_DYNAMIC_STATE_VIEWPORT,
+                               VK_DYNAMIC_STATE_SCISSOR,
+                               VK_DYNAMIC_STATE_DEPTH_BIAS};
+
+        state.viewport = {};
+
+        state.viewport.sType =
+            VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+
+        state.viewport.viewportCount = 1;
+        state.viewport.pViewports = nullptr;
+
+        state.viewport.scissorCount = 1;
+        state.viewport.pScissors = nullptr;
+
+        state.rasterization.sType =
+            VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        state.rasterization.depthClampEnable = VK_FALSE;
+        state.rasterization.rasterizerDiscardEnable = VK_FALSE;
+        state.rasterization.cullMode = vulkan::cullModeToVk(cullMode);
+        state.rasterization.frontFace = vulkan::frontFaceToVk(frontFace);
+        state.rasterization.depthBiasEnable =
+            polygonOffsetEnabled ? VK_TRUE : VK_FALSE;
+        state.rasterization.lineWidth = 1.0;
+
+        state.depthStencil.sType =
+            VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+        state.depthStencil.depthTestEnable =
+            depthTestEnabled ? VK_TRUE : VK_FALSE;
+        state.depthStencil.depthWriteEnable =
+            depthWriteEnabled ? VK_TRUE : VK_FALSE;
+        state.depthStencil.depthCompareOp =
+            vulkan::compareOpToVk(depthCompareOp);
+        state.depthStencil.depthBoundsTestEnable = VK_FALSE;
+        state.depthStencil.stencilTestEnable = VK_FALSE;
+
+        state.colorBlendAttachment.blendEnable =
+            blendingEnabled ? VK_TRUE : VK_FALSE;
+        state.colorBlendAttachment.srcColorBlendFactor =
+            vulkan::blenderFuncToVk(blendSrcFactor);
+        state.colorBlendAttachment.dstColorBlendFactor =
+            vulkan::blenderFuncToVk(blendDstFactor);
+        state.colorBlendAttachment.colorBlendOp =
+            vulkan::blenderOpToVk(blendEquation);
+        state.colorBlendAttachment.srcAlphaBlendFactor =
+            vulkan::blenderFuncToVk(blendSrcFactor);
+        state.colorBlendAttachment.dstAlphaBlendFactor =
+            vulkan::blenderFuncToVk(blendDstFactor);
+        state.colorBlendAttachment.alphaBlendOp =
+            vulkan::blenderOpToVk(blendEquation);
+
+        state.built = true;
+    }
 #endif
 }
 
@@ -1059,6 +1221,5 @@ void Pipeline::bindShaderReadWriteBuffer(const std::string &name,
         "bindShaderReadWriteBuffer is only supported on Metal");
 #endif
 }
-
 
 } // namespace opal

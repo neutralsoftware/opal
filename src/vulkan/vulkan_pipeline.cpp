@@ -293,5 +293,115 @@ VkVertexInputRate vertexBindingInputRateToVk(VertexBindingInputRate inputRate) {
     }
 }
 
+VkPipeline createOrGetPipeline(Pipeline *pipeline,
+                               const RenderTargetSignature &target) {
+    if (pipeline == nullptr) {
+        throw std::runtime_error("Pipeline pointer is null");
+    }
+
+    auto &state = pipelineState(pipeline);
+
+    if (!state.built) {
+        throw std::runtime_error("Pipeline must be built before creating or "
+                                 "retrieving Vulkan pipeline");
+    }
+
+    if (pipeline->shaderProgram == nullptr) {
+        throw std::runtime_error("Pipeline must have a shader program before "
+                                 "creating or retrieving Vulkan pipeline");
+    }
+
+    if (pipeline->shaderProgram->isComputeProgram()) {
+        throw std::runtime_error("Pipeline is a compute program; use "
+                                 "createOrGetComputePipeline instead");
+    }
+
+    auto existing = state.graphicsPipelines.find(target);
+
+    if (existing != state.graphicsPipelines.end()) {
+        return existing->second;
+    }
+
+    auto &program = programState(pipeline->shaderProgram.get());
+    auto &device = deviceState(Device::globalInstance);
+
+    VkPipelineVertexInputStateCreateInfo vertexInput{};
+    vertexInput.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInput.vertexBindingDescriptionCount =
+        static_cast<uint32_t>(state.vertexBindings.size());
+    vertexInput.pVertexBindingDescriptions =
+        state.vertexBindings.empty() ? nullptr : state.vertexBindings.data();
+    vertexInput.vertexAttributeDescriptionCount =
+        static_cast<uint32_t>(state.vertexAttributes.size());
+    vertexInput.pVertexAttributeDescriptions =
+        state.vertexAttributes.empty() ? nullptr
+                                       : state.vertexAttributes.data();
+
+    VkPipelineDynamicStateCreateInfo dynamicInfo{};
+    dynamicInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicInfo.dynamicStateCount =
+        static_cast<uint32_t>(state.dynamicStates.size());
+    dynamicInfo.pDynamicStates =
+        state.dynamicStates.empty() ? nullptr : state.dynamicStates.data();
+
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.rasterizationSamples = target.samples;
+    multisampling.sampleShadingEnable = VK_FALSE;
+
+    std::vector<VkPipelineColorBlendAttachmentState> blendAttachments(
+        target.colorFormats.size(), state.colorBlendAttachment);
+
+    VkPipelineColorBlendStateCreateInfo colorBlend{};
+    colorBlend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlend.logicOpEnable = VK_FALSE;
+    colorBlend.attachmentCount = static_cast<uint32_t>(blendAttachments.size());
+    colorBlend.pAttachments =
+        blendAttachments.empty() ? nullptr : blendAttachments.data();
+
+    VkPipelineRenderingCreateInfo renderingInfo{};
+    renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    renderingInfo.viewMask = target.viewMask;
+    renderingInfo.colorAttachmentCount =
+        static_cast<uint32_t>(target.colorFormats.size());
+    renderingInfo.pColorAttachmentFormats =
+        target.colorFormats.empty() ? nullptr : target.colorFormats.data();
+    renderingInfo.depthAttachmentFormat = target.depthFormat;
+    renderingInfo.stencilAttachmentFormat = target.stencilFormat;
+
+    VkGraphicsPipelineCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    createInfo.pNext = &renderingInfo;
+    createInfo.stageCount = static_cast<uint32_t>(program.shaderStages.size());
+    createInfo.pStages = program.shaderStages.data();
+    createInfo.pVertexInputState = &vertexInput;
+    createInfo.pInputAssemblyState = &state.inputAssembly;
+    createInfo.pTessellationState =
+        state.hasTessellation ? &state.tessellation : nullptr;
+    createInfo.pViewportState = &state.viewport;
+    createInfo.pRasterizationState = &state.rasterization;
+    createInfo.pMultisampleState = &multisampling;
+    createInfo.pDepthStencilState = &state.depthStencil;
+    createInfo.pColorBlendState = &colorBlend;
+    createInfo.pDynamicState = &dynamicInfo;
+    createInfo.layout = program.pipelineLayout;
+    createInfo.renderPass = VK_NULL_HANDLE;
+    createInfo.subpass = 0;
+    createInfo.basePipelineHandle = VK_NULL_HANDLE;
+    createInfo.basePipelineIndex = -1;
+
+    VkPipeline vkPipeline = VK_NULL_HANDLE;
+
+    VULKAN_GUARD(vkCreateGraphicsPipelines(device.device, VK_NULL_HANDLE, 1,
+                                           &createInfo, nullptr, &vkPipeline),
+                 "Failed to create Vulkan graphics pipeline");
+
+    state.graphicsPipelines.emplace(target, vkPipeline);
+
+    return vkPipeline;
+}
+
 } // namespace opal::vulkan
 #endif

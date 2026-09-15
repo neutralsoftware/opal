@@ -10,6 +10,7 @@
 #ifndef VULKAN_STATE_H
 #define VULKAN_STATE_H
 
+#include "slang/external/vulkan/include/vulkan/vulkan_core.h"
 #include <cwchar>
 #include <vector>
 #ifdef VULKAN
@@ -272,30 +273,70 @@ struct BoundBufferResource {
     VkDeviceSize range = VK_WHOLE_SIZE;
 };
 
+struct RenderTargetSignature {
+    std::vector<VkFormat> colorFormats;
+
+    VkFormat depthFormat = VK_FORMAT_UNDEFINED;
+    VkFormat stencilFormat = VK_FORMAT_UNDEFINED;
+
+    VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+
+    uint32_t viewMask = 0;
+
+    bool operator==(const RenderTargetSignature &other) const {
+        return colorFormats == other.colorFormats &&
+               depthFormat == other.depthFormat &&
+               stencilFormat == other.stencilFormat &&
+               samples == other.samples && viewMask == other.viewMask;
+    }
+};
+
+struct RenderTargetSignatureHash {
+    size_t operator()(const RenderTargetSignature &key) const {
+        size_t hash = 0;
+
+        auto combine = [&](size_t value) {
+            hash ^= value + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        };
+
+        for (VkFormat format : key.colorFormats) {
+            combine(std::hash<uint32_t>{}(static_cast<uint32_t>(format)));
+        }
+
+        combine(std::hash<uint32_t>{}(static_cast<uint32_t>(key.depthFormat)));
+
+        combine(
+            std::hash<uint32_t>{}(static_cast<uint32_t>(key.stencilFormat)));
+
+        combine(std::hash<uint32_t>{}(static_cast<uint32_t>(key.samples)));
+
+        combine(std::hash<uint32_t>{}(key.viewMask));
+
+        return hash;
+    }
+};
+
 struct PipelineState {
-    VkPipeline computePipeline = VK_NULL_HANDLE;
-
-    std::unordered_map<PipelineRenderTargetKey, VkPipeline> graphicsPipelines;
-
-    VkPipelineBindPoint bindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-
-    VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    VkPolygonMode polygonMode = VK_POLYGON_MODE_FILL;
-    VkCullModeFlags cullMode = VK_CULL_MODE_BACK_BIT;
-    VkFrontFace frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-    VkCompareOp depthCompare = VK_COMPARE_OP_LESS;
-
     std::vector<VkVertexInputBindingDescription> vertexBindings;
     std::vector<VkVertexInputAttributeDescription> vertexAttributes;
 
-    std::unordered_map<std::string, VulkanUniformBlock> uniformsByName;
-    std::unordered_map<uint64_t, VulkanUniformBlock> uniformBlocks;
-    std::unordered_map<uint64_t, BoundBufferResource> boundBuffers;
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    VkPipelineViewportStateCreateInfo viewport{};
+    VkPipelineRasterizationStateCreateInfo rasterization{};
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
 
-    std::vector<std::vector<VkDescriptorSet>> descriptorSets;
+    VkPipelineTessellationStateCreateInfo tessellation{};
+    bool hasTessellation = false;
 
-    bool descriptorsDirty = false;
-    bool pipelineDirty = false;
+    VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+
+    std::vector<VkDynamicState> dynamicStates;
+
+    VkPipeline computePipeline = VK_NULL_HANDLE;
+
+    std::unordered_map<RenderTargetSignature, VkPipeline,
+                       RenderTargetSignatureHash>
+        graphicsPipelines;
 
     bool built = false;
 };
@@ -386,6 +427,9 @@ VkFormat vertexAttributeFormatToVk(VertexAttributeType type, uint size,
                                    bool normalized);
 
 VkVertexInputRate vertexBindingRateToVk(VertexBindingInputRate rate);
+
+VkPipeline createOrGetPipeline(Pipeline *pipeline,
+                               const RenderTargetSignature &target);
 
 } // namespace opal::vulkan
 
