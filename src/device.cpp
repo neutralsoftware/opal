@@ -9,6 +9,7 @@
 
 #include "diagnostics.h"
 #include "opal/opal.h"
+#include "slang/external/vulkan/include/vulkan/vulkan_core.h"
 #include "windowing.h"
 #include <algorithm>
 #include <cmath>
@@ -202,6 +203,12 @@ std::shared_ptr<Context> Context::create(ContextConfiguration config) {
 
     VkInstanceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+#ifdef __APPLE__
+    detail::log(LogLevel::Warning,
+                "Consider using Metal instead of Vulkan on macOS for better "
+                "performance and compatibility");
+    createInfo.flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+#endif
     createInfo.pApplicationInfo = &appInfo;
 
     std::vector<const char *> extensions;
@@ -390,6 +397,13 @@ DeviceInfo Device::getDeviceInfo() {
             std::to_string(VK_VERSION_MAJOR(props.apiVersion)) + "." +
             std::to_string(VK_VERSION_MINOR(props.apiVersion)) + "." +
             std::to_string(VK_VERSION_PATCH(props.apiVersion));
+        info.opalVersion = OPAL_VERSION;
+        return info;
+    } else {
+        info.deviceName = "Unknown Vulkan Device";
+        info.vendorName = "Unknown";
+        info.driverVersion = "N/A";
+        info.renderingVersion = "Unknown";
         info.opalVersion = OPAL_VERSION;
         return info;
     }
