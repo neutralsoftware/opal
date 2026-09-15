@@ -334,6 +334,83 @@ void createPools(DeviceState &deviceState) {
                  "Failed to create compute command pool");
 }
 
+VkBufferUsageFlags bufferUsageToVk(BufferUsage usage) {
+    switch (usage) {
+    case BufferUsage::VertexBuffer:
+        return VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+               VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+               VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+    case BufferUsage::IndexArray:
+        return VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+               VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+               VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+    case BufferUsage::UniformBuffer:
+        return VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
+               VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+    case BufferUsage::ShaderRead:
+        return VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+               VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+    case BufferUsage::ShaderReadWrite:
+        return VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+               VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+               VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+    case BufferUsage::GeneralPurpose:
+        return VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+               VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+               VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+    default:
+        throw std::runtime_error("Unsupported Vulkan buffer usage");
+    }
+}
+
+void createBuffer(DeviceState &deviceState, VkDeviceSize size,
+                  VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
+                  VkBuffer &buffer, VkDeviceMemory &memory) {
+    VkBufferCreateInfo bufferInfo{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                  .pNext = nullptr,
+                                  .flags = 0,
+                                  .size = size,
+                                  .usage = usage,
+                                  .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                                  .queueFamilyIndexCount = 0,
+                                  .pQueueFamilyIndices = nullptr};
+
+    VULKAN_GUARD(
+        vkCreateBuffer(deviceState.device, &bufferInfo, nullptr, &buffer),
+        "Failed to create Vulkan buffer");
+
+    VkMemoryRequirements memoryRequirements{};
+    vkGetBufferMemoryRequirements(deviceState.device, buffer,
+                                  &memoryRequirements);
+
+    VkMemoryAllocateInfo allocationInfo{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = nullptr,
+        .allocationSize = memoryRequirements.size,
+        .memoryTypeIndex =
+            findMemoryType(deviceState.physicalDeviceInfo.device,
+                           memoryRequirements.memoryTypeBits, properties)};
+
+    VkResult result =
+        vkAllocateMemory(deviceState.device, &allocationInfo, nullptr, &memory);
+
+    if (result != VK_SUCCESS) {
+        vkDestroyBuffer(deviceState.device, buffer, nullptr);
+        buffer = VK_NULL_HANDLE;
+
+        throw std::runtime_error("Failed to allocate Vulkan buffer memory");
+    }
+
+    VULKAN_GUARD(vkBindBufferMemory(deviceState.device, buffer, memory, 0),
+                 "Failed to bind Vulkan buffer memory");
+}
+
 } // namespace opal::vulkan
 
 #endif

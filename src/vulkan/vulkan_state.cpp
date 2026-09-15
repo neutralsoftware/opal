@@ -82,6 +82,11 @@ PipelineState &pipelineState(Pipeline *pipeline) {
     return (*states)[pipeline];
 }
 
+BufferState &bufferState(Buffer *buffer) {
+    static auto *states = new std::unordered_map<Buffer *, BufferState>();
+    return (*states)[buffer];
+}
+
 uint32_t registerTextureHandle(const std::shared_ptr<Texture> &texture) {
     static uint32_t nextHandle = 1;
     auto &handles = textureHandlesStorage();
@@ -245,6 +250,31 @@ void releasePipelineState(Pipeline *pipeline) {
         if (state.computePipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, state.computePipeline, nullptr);
             state.computePipeline = VK_NULL_HANDLE;
+        }
+    }
+}
+
+void releaseBufferState(Buffer *buffer) {
+    if (buffer == nullptr) {
+        return;
+    }
+    VkDevice device = VK_NULL_HANDLE;
+    if (Device::globalInstance != nullptr) {
+        device = deviceState(Device::globalInstance).device;
+    }
+    auto &state = bufferState(buffer);
+    if (device != VK_NULL_HANDLE) {
+        if (state.mapped != nullptr) {
+            vkUnmapMemory(device, state.memory);
+            state.mapped = nullptr;
+        }
+        if (state.buffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device, state.buffer, nullptr);
+            state.buffer = VK_NULL_HANDLE;
+        }
+        if (state.memory != VK_NULL_HANDLE) {
+            vkFreeMemory(device, state.memory, nullptr);
+            state.memory = VK_NULL_HANDLE;
         }
     }
 }

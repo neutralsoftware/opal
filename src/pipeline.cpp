@@ -9,7 +9,6 @@
 
 #include "diagnostics.h"
 #include "opal/opal.h"
-#include "slang/external/vulkan/include/vulkan/vulkan_core.h"
 #include <algorithm>
 #include <cstring>
 #include <glad/glad.h>

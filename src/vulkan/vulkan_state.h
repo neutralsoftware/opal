@@ -349,6 +349,18 @@ struct PipelineState {
     bool built = false;
 };
 
+struct BufferState {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+
+    VkDeviceSize size = 0;
+
+    VkBufferUsageFlags usageFlags = 0;
+    VkMemoryPropertyFlags memoryProperties = 0;
+
+    void *mapped = nullptr;
+};
+
 SlangCompilerState &slangCompiler();
 ContextState &contextState(Context *context);
 DeviceState &deviceState(Device *device);
@@ -358,6 +370,7 @@ TextureState &textureState(Texture *texture);
 ShaderState &shaderState(Shader *shader);
 ProgramState &programState(ShaderProgram *program);
 PipelineState &pipelineState(Pipeline *pipeline);
+BufferState &bufferState(Buffer *buffer);
 
 uint32_t registerTextureHandle(const std::shared_ptr<Texture> &texture);
 std::shared_ptr<Texture> getTextureFromHandle(uint32_t handle);
@@ -370,6 +383,7 @@ void releaseTextureState(Texture *texture);
 void releaseShaderState(Shader *shader);
 void releaseProgramState(ShaderProgram *program);
 void releasePipelineState(Pipeline *pipeline);
+void releaseBufferState(Buffer *buffer);
 
 bool checkValidationLayerSupport();
 VKAPI_ATTR VkBool32 VKAPI_CALL vulkanDebugCallback(
@@ -446,6 +460,11 @@ void bindPipeline(CommandBuffer *commandBuffer, Pipeline *pipeline,
 
 void applyDynamicPipelineState(CommandBuffer *commandBuffer, Pipeline *pipeline,
                                VkExtent2D renderExtent);
+
+VkBufferUsageFlags bufferUsageToVk(BufferUsage usage);
+void createBuffer(DeviceState &deviceState, VkDeviceSize size,
+                  VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
+                  VkBuffer &buffer, VkDeviceMemory &memory);
 
 } // namespace opal::vulkan
 

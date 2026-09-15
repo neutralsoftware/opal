@@ -7,16 +7,19 @@
 // Copyright (c) 2025 maxvdec
 //
 
+#include "diagnostics.h"
+#include <cstring>
+#include <glad/glad.h>
 #include <memory>
 #include <opal/opal.h>
-#include "diagnostics.h"
-#include <glad/glad.h>
-#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #ifdef METAL
 #include "metal_state.h"
+#elif VULKAN
+#include "vulkan/vulkan.h"
+#include "vulkan_state.h"
 #endif
 
 namespace opal {
@@ -24,6 +27,8 @@ namespace opal {
 Buffer::~Buffer() {
 #ifdef METAL
     metal::releaseBufferState(this);
+#elif VULKAN
+    vulkan::releaseBufferState(this);
 #endif
 }
 
@@ -120,15 +125,44 @@ std::shared_ptr<Buffer> Buffer::create(BufferUsage usage, size_t size,
                 NS::Range::Make(0, static_cast<NS::UInteger>(size)));
         }
     }
+#elif VULKAN
+    if (Device::globalInstance == nullptr) {
+        throw std::runtime_error("Cannot create Vulkan buffer without device");
+    }
+
+    auto &deviceState = vulkan::deviceState(Device::globalInstance);
+
+    if (deviceState.device == VK_NULL_HANDLE) {
+        throw std::runtime_error("Vulkan device is not initialized");
+    }
+
+    auto &state = vulkan::bufferState(buffer.get());
+    state.size = std::max<VkDeviceSize>(static_cast<VkDeviceSize>(size), 1);
+
+    state.usageFlags = vulkan::bufferUsageToVk(usage);
+
+    state.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+    vulkan::createBuffer(deviceState, state.size, state.usageFlags,
+                         state.memoryProperties, state.buffer, state.memory);
+
+    VULKAN_GUARD(vkMapMemory(deviceState.device, state.memory, 0, state.size, 0,
+                             &state.mapped),
+                 "Failed to map Vulkan buffer memory");
+
+    if (data != nullptr && size > 0) {
+        std::memcpy(state.mapped, data, size);
+    }
 #endif
 
-    detail::emit(ResourceEvent{std::to_string(callerId), ResourceType::Buffer,
-                               ResourceOperation::Created,
-                               Device::globalInstance
-                                   ? static_cast<unsigned int>(
-                                         Device::globalInstance->frameCount)
-                                   : 0,
-                               static_cast<float>(size) / (1024.0f * 1024.0f)});
+    detail::emit(ResourceEvent{
+        std::to_string(callerId), ResourceType::Buffer,
+        ResourceOperation::Created,
+        Device::globalInstance
+            ? static_cast<unsigned int>(Device::globalInstance->frameCount)
+            : 0,
+        static_cast<float>(size) / (1024.0f * 1024.0f)});
     return buffer;
 }
 
@@ -206,6 +240,58 @@ void Buffer::updateData(size_t offset, size_t size, const void *data) {
             NS::Range::Make(static_cast<NS::UInteger>(offset),
                             static_cast<NS::UInteger>(size)));
     }
+#elif defined(VULKAN)
+    if (Device::globalInstance == nullptr) {
+        throw std::runtime_error("Cannot update Vulkan buffer without device");
+    }
+
+    if (data == nullptr || size == 0) {
+        return;
+    }
+
+    auto &deviceState = vulkan::deviceState(Device::globalInstance);
+
+    auto &state = vulkan::bufferState(this);
+
+    if (state.buffer == VK_NULL_HANDLE || state.memory == VK_NULL_HANDLE) {
+        throw std::runtime_error("Vulkan buffer is not initialized");
+    }
+
+    const VkDeviceSize requiredSize = static_cast<VkDeviceSize>(offset + size);
+
+    if (requiredSize > state.size) {
+        VkBuffer newBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory newMemory = VK_NULL_HANDLE;
+
+        vulkan::createBuffer(deviceState, requiredSize, state.usageFlags,
+                             state.memoryProperties, newBuffer, newMemory);
+
+        void *newMapped = nullptr;
+
+        VULKAN_GUARD(vkMapMemory(deviceState.device, newMemory, 0, requiredSize,
+                                 0, &newMapped),
+                     "Failed to map resized Vulkan buffer");
+
+        if (state.mapped != nullptr && state.size > 0) {
+            std::memcpy(newMapped, state.mapped,
+                        static_cast<size_t>(state.size));
+        }
+
+        if (state.mapped != nullptr) {
+            vkUnmapMemory(deviceState.device, state.memory);
+        }
+
+        vkDestroyBuffer(deviceState.device, state.buffer, nullptr);
+
+        vkFreeMemory(deviceState.device, state.memory, nullptr);
+
+        state.buffer = newBuffer;
+        state.memory = newMemory;
+        state.mapped = newMapped;
+        state.size = requiredSize;
+    }
+
+    std::memcpy(static_cast<uint8_t *>(state.mapped) + offset, data, size);
 #endif
 }
 
@@ -240,13 +326,13 @@ void Buffer::bind(int callerId) const {
 #elif defined(METAL)
 #endif
 
-    detail::emit(ResourceEvent{std::to_string(callerId), ResourceType::Buffer,
-                               ResourceOperation::Loaded,
-                               Device::globalInstance
-                                   ? static_cast<unsigned int>(
-                                         Device::globalInstance->frameCount)
-                                   : 0,
-                               0.0f});
+    detail::emit(ResourceEvent{
+        std::to_string(callerId), ResourceType::Buffer,
+        ResourceOperation::Loaded,
+        Device::globalInstance
+            ? static_cast<unsigned int>(Device::globalInstance->frameCount)
+            : 0,
+        0.0f});
 }
 
 void Buffer::unbind(int callerId) const {
@@ -279,13 +365,13 @@ void Buffer::unbind(int callerId) const {
     glBindBuffer(glTarget, 0);
 #elif defined(METAL)
 #endif
-    detail::emit(ResourceEvent{std::to_string(callerId), ResourceType::Buffer,
-                               ResourceOperation::Unloaded,
-                               Device::globalInstance
-                                   ? static_cast<unsigned int>(
-                                         Device::globalInstance->frameCount)
-                                   : 0,
-                               0.0f});
+    detail::emit(ResourceEvent{
+        std::to_string(callerId), ResourceType::Buffer,
+        ResourceOperation::Unloaded,
+        Device::globalInstance
+            ? static_cast<unsigned int>(Device::globalInstance->frameCount)
+            : 0,
+        0.0f});
 }
 
 std::shared_ptr<DrawingState>
