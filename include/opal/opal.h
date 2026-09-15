@@ -872,7 +872,6 @@ class ResolveAction {
     bool resolveColor = true;
 };
 
-#ifdef METAL
 struct PrimitiveVertex {
     float position[3];
     float normal[3];
@@ -880,6 +879,16 @@ struct PrimitiveVertex {
     float bitangent[3];
     float uv[2];
 };
+
+struct AccelerationStructureInstance {
+    std::shared_ptr<PrimitiveAccelerationStructure> blas;
+    glm::mat4 transform;
+    uint32_t instanceId;
+    uint32_t mask;
+    bool cullDisable;
+};
+
+#ifdef METAL
 
 class PrimitiveAccelerationStructure {
   public:
@@ -909,14 +918,6 @@ class PrimitiveAccelerationStructure {
 
 static inline void writeMetalTransform3x4(const glm::mat4 &M, float out3x4[12]);
 
-struct AccelerationStructureInstance {
-    std::shared_ptr<PrimitiveAccelerationStructure> blas;
-    glm::mat4 transform;
-    uint32_t instanceId;
-    uint32_t mask;
-    bool cullDisable;
-};
-
 class InstanceAccelerationStructure {
   public:
     ~InstanceAccelerationStructure();
@@ -938,6 +939,10 @@ class InstanceAccelerationStructure {
 
     friend class CommandBuffer;
 };
+#elif VULKAN
+
+class PrimitiveAccelerationStructure {};
+class InstanceAccelerationStructure {};
 
 #endif
 

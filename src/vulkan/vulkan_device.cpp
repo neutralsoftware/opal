@@ -30,7 +30,8 @@ PhysicalDeviceInfo pickPhysicalDevice(VkInstance instance,
     std::vector<VkPhysicalDevice> devices(deviceCount);
     vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
 
-    std::unordered_map<PhysicalDeviceInfo, uint32_t> deviceScores;
+    std::unordered_map<VkPhysicalDevice, uint32_t> deviceScores;
+    std::vector<PhysicalDeviceInfo> suitableDevices;
 
     for (const auto &device : devices) {
         VkPhysicalDeviceProperties deviceProperties;
@@ -95,13 +96,17 @@ PhysicalDeviceInfo pickPhysicalDevice(VkInstance instance,
         info.features.pNext = nullptr;
         info.queueFamilies = queueFamilies;
         info.properties = deviceProperties;
-        deviceScores[info] = score;
+        deviceScores[info.device] = score;
+        suitableDevices.push_back(info);
     }
 
     std::tuple<PhysicalDeviceInfo, uint32_t> bestDevice{};
-    for (const auto &[info, score] : deviceScores) {
+    for (int i = 0; i < suitableDevices.size(); ++i) {
+        const auto &deviceInfo = suitableDevices[i];
+        uint32_t score = deviceScores[deviceInfo.device];
+
         if (std::get<1>(bestDevice) < score) {
-            bestDevice = std::make_tuple(info, score);
+            bestDevice = std::make_tuple(deviceInfo, score);
         }
     }
 
@@ -155,6 +160,19 @@ DeviceQueueFamilies findQueueFamilies(VkPhysicalDevice device,
     }
 
     return deviceQueueFamilies;
+}
+
+PhysicalDeviceInfo buildQueuesAndPhysicalDevice(VkInstance instance,
+                                                VkSurfaceKHR surface) {
+    PhysicalDeviceInfo physicalDeviceInfo =
+        pickPhysicalDevice(instance, surface);
+
+    if (physicalDeviceInfo.device == VK_NULL_HANDLE) {
+        throw std::runtime_error(
+            "Failed to find a suitable Vulkan physical device");
+    }
+
+    return physicalDeviceInfo;
 }
 
 bool supportsRayTracing(VkPhysicalDevice device) {

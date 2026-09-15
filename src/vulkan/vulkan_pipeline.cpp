@@ -691,5 +691,16 @@ void updateVulkanUniform(Pipeline *pipeline, const std::string &name,
     block.dirty = true;
 }
 
+VkVertexInputRate vertexBindingRateToVk(VertexBindingInputRate rate) {
+    switch (rate) {
+    case VertexBindingInputRate::Vertex:
+        return VK_VERTEX_INPUT_RATE_VERTEX;
+    case VertexBindingInputRate::Instance:
+        return VK_VERTEX_INPUT_RATE_INSTANCE;
+    default:
+        return VK_VERTEX_INPUT_RATE_VERTEX;
+    }
+}
+
 } // namespace opal::vulkan
 #endif
