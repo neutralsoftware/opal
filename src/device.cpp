@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstring>
 #include <glad/glad.h>
 #include <memory>
 #include <stdexcept>
@@ -47,7 +48,12 @@ Context::~Context() {
 Device::~Device() {
 #ifdef METAL
     metal::releaseDeviceState(this);
+#elif VULKAN
+    vulkan::releaseDeviceState(this);
 #endif
+    if (Device::globalInstance == this) {
+        Device::globalInstance = nullptr;
+    }
 }
 
 #ifdef METAL
@@ -199,13 +205,14 @@ std::shared_ptr<Context> Context::create(ContextConfiguration config) {
     appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
     appInfo.pEngineName = "Atlas Engine";
     appInfo.engineVersion = VK_MAKE_VERSION(0, 1, 0);
-    uint32_t supportedVersion = VK_API_VERSION_1_2;
-
-    vkEnumerateInstanceVersion(&supportedVersion);
-
-    uint32_t requestedVersion = std::min(supportedVersion, VK_API_VERSION_1_3);
-    appInfo.apiVersion = requestedVersion;
-    vulkanState.apiVersion = requestedVersion;
+    uint32_t supportedVersion = VK_API_VERSION_1_0;
+    VULKAN_GUARD(vkEnumerateInstanceVersion(&supportedVersion),
+                 "Failed to query Vulkan instance version");
+    if (supportedVersion < VK_API_VERSION_1_3) {
+        throw std::runtime_error("Opal requires Vulkan 1.3");
+    }
+    appInfo.apiVersion = VK_API_VERSION_1_3;
+    vulkanState.apiVersion = VK_API_VERSION_1_3;
 
     VkInstanceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -223,19 +230,40 @@ std::shared_ptr<Context> Context::create(ContextConfiguration config) {
     const char *const *sdlExtensions =
         SDL_Vulkan_GetInstanceExtensions(&sdlExtensionCount);
 
+    if (sdlExtensions == nullptr || sdlExtensionCount == 0) {
+        throw std::runtime_error(
+            "Failed to obtain required Vulkan instance extensions from SDL");
+    }
+
     for (Uint32 i = 0; i < sdlExtensionCount; ++i) {
         extensions.push_back(sdlExtensions[i]);
     }
 
-    extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    const bool validationEnabled =
+        config.createValidationLayers && vulkan::checkValidationLayerSupport();
+
+    if (validationEnabled) {
+        extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    }
+
+#ifdef __APPLE__
+    if (std::find_if(
+            extensions.begin(), extensions.end(), [](const char *extension) {
+                return std::strcmp(
+                           extension,
+                           VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0;
+            }) == extensions.end()) {
+        extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+    }
+    createInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+#endif
 
     createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
     createInfo.ppEnabledExtensionNames = extensions.data();
 
     VkDebugUtilsMessengerCreateInfoEXT debugInfo{};
 
-    if (vulkan::checkValidationLayerSupport() &&
-        config.createValidationLayers) {
+    if (validationEnabled) {
         const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
 
         createInfo.enabledLayerCount = 1;
@@ -243,7 +271,7 @@ std::shared_ptr<Context> Context::create(ContextConfiguration config) {
 
         vulkan::configureDebugMessenger(debugInfo);
         createInfo.pNext = &debugInfo;
-    } else {
+    } else if (config.createValidationLayers) {
         detail::log(LogLevel::Warning,
                     "Validation layer not available, proceeding without it");
         createInfo.enabledLayerCount = 0;
@@ -253,7 +281,9 @@ std::shared_ptr<Context> Context::create(ContextConfiguration config) {
     VULKAN_GUARD(vkCreateInstance(&createInfo, nullptr, &vulkanState.instance),
                  "Failed to create Vulkan instance");
 
-    if (config.createValidationLayers) {
+    vulkanState.validationEnabled = validationEnabled;
+
+    if (validationEnabled) {
         auto createDebugMessenger =
             reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
                 vkGetInstanceProcAddr(vulkanState.instance,
@@ -523,6 +553,11 @@ Device::acquire([[maybe_unused]] const std::shared_ptr<Context> &context) {
     vulkan::createSwapchain(vulkanContextState, vulkanState, width, height);
 
     vulkan::createSwapchainImages(vulkanContextState, vulkanState);
+    vulkanState.defaultDepthTexture = Texture::create(
+        TextureType::Texture2D, vulkan::chooseDepthTextureFormat(vulkanState),
+        vulkanContextState.swapchainExtent.width,
+        vulkanContextState.swapchainExtent.height,
+        TextureDataFormat::DepthComponent, nullptr, 1);
     return device;
 #else
     throw std::runtime_error("No rendering backend selected");

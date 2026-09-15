@@ -483,8 +483,8 @@ struct VertexAttribute {
 };
 
 struct VertexBinding {
-    uint stride;
-    VertexBindingInputRate inputRate;
+    uint stride = 0;
+    VertexBindingInputRate inputRate = VertexBindingInputRate::Vertex;
 };
 
 class PrimitiveAccelerationStructure;

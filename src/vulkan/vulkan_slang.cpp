@@ -8,7 +8,11 @@
 //
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cstdint>
+#include <cstring>
+#include <functional>
 #include <limits>
 #include <string>
 #include <utility>
@@ -50,17 +54,25 @@ std::vector<uint32_t> compileSlangToSPIRV(const std::string &source,
                                           ShaderType type,
                                           const std::string &entryPoint) {
     auto &compiler = slangCompiler();
+    (void)type;
 
     Slang::ComPtr<slang::IBlob> diagnostics;
     Slang::ComPtr<slang::IModule> module;
 
+    static std::atomic<uint64_t> nextModuleId = 1;
+    std::string moduleName =
+        "opal_shader_" + std::to_string(nextModuleId.fetch_add(1));
+    std::string modulePath = moduleName + ".slang";
+
     module = compiler.session->loadModuleFromSourceString(
-        "opal_shader", "opal_shader.slang", source.c_str(),
+        moduleName.c_str(), modulePath.c_str(), source.c_str(),
         diagnostics.writeRef());
 
     if (!module) {
         const char *message =
-            static_cast<const char *>(diagnostics->getBufferPointer());
+            diagnostics
+                ? static_cast<const char *>(diagnostics->getBufferPointer())
+                : "Unknown Slang module error";
         opal::detail::log(LogLevel::Error, message);
         throw std::runtime_error("Failed to load Slang module: " +
                                  std::string(message));
@@ -251,6 +263,128 @@ std::vector<ShaderBinding> reflectShaderBindings(ShaderState &state,
         block.size = compiler.get_declared_struct_size(blockType);
         block.members.reserve(blockType.member_types.size());
 
+        std::string typeName = compiler.get_name(resource.base_type_id);
+
+        auto registerMember = [&](const std::string &name,
+                                  const UniformMember &source,
+                                  bool preserveExisting) {
+            if (name.empty()) {
+                return;
+            }
+            UniformMember member = source;
+            member.name = name;
+            auto existing = programState.uniformsByName.find(name);
+            if (existing == programState.uniformsByName.end()) {
+                programState.uniformsByName.emplace(name, member);
+                return;
+            }
+            if (preserveExisting) {
+                return;
+            }
+            if (existing->second.set != member.set ||
+                existing->second.binding != member.binding ||
+                existing->second.offset != member.offset ||
+                existing->second.size != member.size) {
+                throw std::runtime_error(
+                    "Conflicting Vulkan uniforms use the name: " + name);
+            }
+        };
+
+        std::function<void(const spirv_cross::SPIRType &, size_t,
+                           const std::string &)>
+            registerMembers;
+        registerMembers = [&](const spirv_cross::SPIRType &structure,
+                              size_t baseOffset, const std::string &prefix) {
+            for (uint32_t index = 0; index < structure.member_types.size();
+                 ++index) {
+                const auto &memberType =
+                    compiler.get_type(structure.member_types[index]);
+                std::string memberName =
+                    compiler.get_member_name(structure.self, index);
+                if (memberName.empty()) {
+                    memberName = std::to_string(index);
+                }
+                std::string path =
+                    prefix.empty() ? memberName : prefix + "." + memberName;
+
+                UniformMember member{};
+                member.name = path;
+                member.set = set;
+                member.binding = binding;
+                member.offset = baseOffset + compiler.type_struct_member_offset(
+                                                 structure, index);
+                member.size =
+                    compiler.get_declared_struct_member_size(structure, index);
+
+                registerMember(path, member, true);
+                registerMember(block.name + "." + path, member, false);
+                if (!typeName.empty() && typeName != block.name) {
+                    registerMember(typeName + "." + path, member, false);
+                }
+
+                const std::string reflectedTypeName =
+                    compiler.get_name(memberType.self);
+                if (memberType.basetype == spirv_cross::SPIRType::Struct &&
+                    reflectedTypeName.starts_with("_Array") &&
+                    !memberType.member_types.empty()) {
+                    const auto &arrayType =
+                        compiler.get_type(memberType.member_types.front());
+                    if (!arrayType.array.empty()) {
+                        uint32_t stride =
+                            compiler.type_struct_member_array_stride(memberType,
+                                                                     0);
+                        size_t arrayOffset =
+                            member.offset +
+                            compiler.type_struct_member_offset(memberType, 0);
+                        for (uint32_t element = 0;
+                             element < arrayType.array.front(); ++element) {
+                            UniformMember arrayMember = member;
+                            arrayMember.offset = arrayOffset + element * stride;
+                            arrayMember.size = stride;
+                            std::string elementName =
+                                path + "[" + std::to_string(element) + "]";
+                            registerMember(elementName, arrayMember, true);
+                            registerMember(block.name + "." + elementName,
+                                           arrayMember, false);
+                            if (!typeName.empty() && typeName != block.name) {
+                                registerMember(typeName + "." + elementName,
+                                               arrayMember, false);
+                            }
+                        }
+                    }
+                } else if (!memberType.array.empty()) {
+                    uint32_t stride = compiler.type_struct_member_array_stride(
+                        structure, index);
+                    for (uint32_t element = 0;
+                         element < memberType.array.front(); ++element) {
+                        UniformMember arrayMember = member;
+                        arrayMember.offset = member.offset + element * stride;
+                        arrayMember.size = stride;
+                        std::string elementName =
+                            path + "[" + std::to_string(element) + "]";
+                        registerMember(elementName, arrayMember, true);
+                        registerMember(block.name + "." + elementName,
+                                       arrayMember, false);
+                        if (!typeName.empty() && typeName != block.name) {
+                            registerMember(typeName + "." + elementName,
+                                           arrayMember, false);
+                        }
+                        if (memberType.basetype ==
+                            spirv_cross::SPIRType::Struct) {
+                            registerMembers(memberType, arrayMember.offset,
+                                            elementName);
+                        }
+                    }
+                } else if (memberType.basetype ==
+                               spirv_cross::SPIRType::Struct &&
+                           !reflectedTypeName.starts_with("_MatrixStorage")) {
+                    registerMembers(memberType, member.offset, path);
+                }
+            }
+        };
+
+        registerMembers(blockType, 0, "");
+
         for (uint32_t index = 0; index < blockType.member_types.size();
              ++index) {
             UniformMember member{};
@@ -266,18 +400,6 @@ std::vector<ShaderBinding> reflectShaderBindings(ShaderState &state,
             member.size = compiler.get_declared_struct_member_size(blockType,
                                                                    index);
             block.members.push_back(member);
-
-            auto existingMember = programState.uniformsByName.find(member.name);
-            if (existingMember == programState.uniformsByName.end()) {
-                programState.uniformsByName.emplace(member.name, member);
-            } else if (existingMember->second.set != member.set ||
-                       existingMember->second.binding != member.binding ||
-                       existingMember->second.offset != member.offset ||
-                       existingMember->second.size != member.size) {
-                throw std::runtime_error(
-                    "Conflicting Vulkan uniforms use the name: " +
-                    member.name);
-            }
         }
 
         auto existingBlock = std::find_if(

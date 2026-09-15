@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstring>
 #include <glad/glad.h>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <unordered_set>
@@ -350,6 +351,8 @@ std::shared_ptr<Pipeline> Pipeline::create() {
 Pipeline::~Pipeline() {
 #ifdef METAL
     metal::releasePipelineState(this);
+#elif VULKAN
+    vulkan::releasePipelineState(this);
 #endif
 }
 
@@ -709,8 +712,32 @@ void Pipeline::build() {
     }
     auto &device = vulkan::deviceState(Device::globalInstance);
 
+    state.built = false;
+
+    for (auto &[signature, pipeline] : state.graphicsPipelines) {
+        if (pipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device.device, pipeline, nullptr);
+        }
+    }
+    state.graphicsPipelines.clear();
+    if (state.computePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device.device, state.computePipeline, nullptr);
+        state.computePipeline = VK_NULL_HANDLE;
+    }
+    if (state.descriptorPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(device.device, state.descriptorPool, nullptr);
+        state.descriptorPool = VK_NULL_HANDLE;
+    }
+    state.descriptorSets.clear();
+    state.descriptorsAllocated = false;
+    state.descriptorsDirty = true;
+    state.boundBuffers.clear();
+    state.boundImages.clear();
+    state.uniformBlocks.clear();
+
     state.vertexBindings.clear();
     state.vertexAttributes.clear();
+    state.vertexDivisors.clear();
 
     state.inputAssembly = {};
     state.viewport = {};
@@ -720,6 +747,28 @@ void Pipeline::build() {
     state.colorBlendAttachment = {};
 
     state.hasTessellation = false;
+
+    for (const auto &reflectedBlock : program.uniformBlocks) {
+        if (reflectedBlock.size == 0 ||
+            reflectedBlock.size > std::numeric_limits<uint32_t>::max()) {
+            throw std::runtime_error("Invalid Vulkan uniform block size");
+        }
+        uint64_t key =
+            vulkan::bindingKey(reflectedBlock.set, reflectedBlock.binding);
+        vulkan::VulkanUniformBlock block{};
+        block.set = reflectedBlock.set;
+        block.binding = reflectedBlock.binding;
+        block.size = static_cast<uint32_t>(reflectedBlock.size);
+        block.data.resize(reflectedBlock.size, 0);
+        auto buffer =
+            Buffer::create(BufferUsage::UniformBuffer, reflectedBlock.size,
+                           block.data.data(), MemoryUsageType::CPUToGPU);
+        block.buffers.push_back(buffer);
+        block.dirty = false;
+        state.boundBuffers[key] = {
+            .buffer = buffer, .offset = 0, .range = reflectedBlock.size};
+        state.uniformBlocks.emplace(key, std::move(block));
+    }
 
     if (shaderProgram->isComputeProgram()) {
         const VkPipelineShaderStageCreateInfo *computeStage = nullptr;
@@ -760,21 +809,27 @@ void Pipeline::build() {
 
         bool hasInstanceAttributes = false;
         uint32_t instanceStride = 0;
+        uint32_t instanceDivisor = 1;
 
         for (const auto &attribute : vertexAttributes) {
             if (attribute.inputRate != VertexBindingInputRate::Instance) {
                 continue;
             }
 
-            hasInstanceAttributes = true;
-
-            instanceStride = std::max(instanceStride,
-                                      static_cast<uint32_t>(attribute.stride));
-
-            if (attribute.divisor > 1) {
+            uint32_t divisor = std::max(attribute.divisor, 1u);
+            uint32_t stride = static_cast<uint32_t>(attribute.stride);
+            if (stride == 0) {
                 throw std::runtime_error(
-                    "Vulkan instance divisor > 1 is not implemented yet");
+                    "Vulkan instance attribute stride must be positive");
             }
+            if (hasInstanceAttributes &&
+                (instanceDivisor != divisor || instanceStride != stride)) {
+                throw std::runtime_error("Vulkan instance attributes must use "
+                                         "one stride and divisor");
+            }
+            hasInstanceAttributes = true;
+            instanceStride = stride;
+            instanceDivisor = divisor;
         }
         state.vertexBindings = {bindingDescription};
         if (hasInstanceAttributes) {
@@ -783,6 +838,14 @@ void Pipeline::build() {
                 .stride = instanceStride,
                 .inputRate = VK_VERTEX_INPUT_RATE_INSTANCE};
             state.vertexBindings.push_back(instanceBindingDescription);
+            if (instanceDivisor > 1) {
+                if (!device.physicalDeviceInfo.hasVertexAttributeDivisor) {
+                    throw std::runtime_error("Selected Vulkan device does not "
+                                             "support instance divisors");
+                }
+                state.vertexDivisors.push_back(
+                    {.binding = 1, .divisor = instanceDivisor});
+            }
         }
 
         for (VertexAttribute &attribute : vertexAttributes) {
@@ -802,6 +865,12 @@ void Pipeline::build() {
             VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
         state.inputAssembly.topology =
             vulkan::primitiveStyleToVk(primitiveStyle);
+        if (primitiveStyle == PrimitiveStyle::TriangleFan &&
+            device.physicalDeviceInfo.hasPortabilitySubset &&
+            !device.physicalDeviceInfo.portabilityFeatures.triangleFans) {
+            throw std::runtime_error(
+                "Selected Vulkan device does not support triangle fans");
+        }
         state.inputAssembly.primitiveRestartEnable = VK_FALSE;
 
         state.dynamicStates = {VK_DYNAMIC_STATE_VIEWPORT,
@@ -829,7 +898,17 @@ void Pipeline::build() {
             polygonOffsetEnabled ? VK_TRUE : VK_FALSE;
         state.rasterization.polygonMode =
             vulkan::rasterizerModeToVk(rasterizerMode);
-        state.rasterization.lineWidth = 1.0;
+        if (rasterizerMode != RasterizerMode::Fill &&
+            !device.physicalDeviceInfo.features.features.fillModeNonSolid) {
+            throw std::runtime_error(
+                "Selected Vulkan device does not support non-solid fill modes");
+        }
+        if (lineWidth != 1.0f &&
+            !device.physicalDeviceInfo.features.features.wideLines) {
+            throw std::runtime_error(
+                "Selected Vulkan device does not support wide lines");
+        }
+        state.rasterization.lineWidth = lineWidth;
 
         state.depthStencil.sType =
             VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
@@ -862,6 +941,11 @@ void Pipeline::build() {
             VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
 
         if (primitiveStyle == PrimitiveStyle::Patches) {
+            if (!device.physicalDeviceInfo.features.features
+                     .tessellationShader) {
+                throw std::runtime_error(
+                    "Selected Vulkan device does not support tessellation");
+            }
             state.hasTessellation = true;
 
             state.tessellation = {};
@@ -870,24 +954,6 @@ void Pipeline::build() {
 
             state.tessellation.patchControlPoints =
                 static_cast<uint32_t>(patchVertices);
-        }
-
-        state.uniformBlocks.clear();
-
-        for (const auto &reflectedBlock : program.uniformBlocks) {
-            uint64_t key =
-                vulkan::bindingKey(reflectedBlock.set, reflectedBlock.binding);
-
-            vulkan::VulkanUniformBlock block{};
-            block.set = reflectedBlock.set;
-            block.binding = reflectedBlock.binding;
-            block.size = static_cast<uint32_t>(reflectedBlock.size);
-
-            block.data.resize(reflectedBlock.size, 0);
-
-            block.dirty = true;
-
-            state.uniformBlocks.emplace(key, std::move(block));
         }
 
         state.built = true;
