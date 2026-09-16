@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstring>
 #include <glad/glad.h>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <unordered_set>
@@ -20,9 +21,11 @@
 #ifdef METAL
 #include "metal_state.h"
 #endif
+#ifdef VULKAN
+#include "vulkan_state.h"
+#endif
 
 namespace opal {
-
 
 #ifdef METAL
 namespace {
@@ -348,9 +351,10 @@ std::shared_ptr<Pipeline> Pipeline::create() {
 Pipeline::~Pipeline() {
 #ifdef METAL
     metal::releasePipelineState(this);
+#elif VULKAN
+    vulkan::releasePipelineState(this);
 #endif
 }
-
 
 void Pipeline::setShaderProgram(std::shared_ptr<ShaderProgram> program) {
     this->shaderProgram = std::move(program);
@@ -367,7 +371,10 @@ void Pipeline::setPrimitiveStyle(PrimitiveStyle style) {
     this->primitiveStyle = style;
 }
 
-void Pipeline::setPatchVertices(int count) { this->patchVertices = count; }
+void Pipeline::setPatchVertices(int count) {
+    this->patchVertices = count;
+    this->primitiveStyle = PrimitiveStyle::Patches;
+}
 
 void Pipeline::setViewport(int x, int y, int width, int height) {
     this->viewportX = x;
@@ -690,6 +697,267 @@ void Pipeline::build() {
     state.depthTestEnabled = this->depthTestEnabled;
     state.depthWriteEnabled = this->depthWriteEnabled;
     state.depthCompare = desiredDepthCompare;
+#elif VULKAN
+    auto &state = vulkan::pipelineState(this);
+    if (Device::globalInstance == nullptr) {
+        throw std::runtime_error("Cannot build Vulkan pipeline without device");
+    }
+    if (shaderProgram == nullptr) {
+        throw std::runtime_error("Pipeline::build() requires a shader program");
+    }
+    auto &program = vulkan::programState(shaderProgram.get());
+    if (!program.linked) {
+        throw std::runtime_error(
+            "Pipeline::build() requires a linked shader program");
+    }
+    auto &device = vulkan::deviceState(Device::globalInstance);
+
+    state.built = false;
+
+    for (auto &[signature, pipeline] : state.graphicsPipelines) {
+        if (pipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device.device, pipeline, nullptr);
+        }
+    }
+    state.graphicsPipelines.clear();
+    if (state.computePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device.device, state.computePipeline, nullptr);
+        state.computePipeline = VK_NULL_HANDLE;
+    }
+    if (state.descriptorPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(device.device, state.descriptorPool, nullptr);
+        state.descriptorPool = VK_NULL_HANDLE;
+    }
+    state.descriptorSets.clear();
+    state.descriptorsAllocated = false;
+    state.descriptorsDirty = true;
+    state.boundBuffers.clear();
+    state.boundImages.clear();
+    state.uniformBlocks.clear();
+
+    state.vertexBindings.clear();
+    state.vertexAttributes.clear();
+    state.vertexDivisors.clear();
+
+    state.inputAssembly = {};
+    state.viewport = {};
+    state.rasterization = {};
+    state.depthStencil = {};
+    state.tessellation = {};
+    state.colorBlendAttachment = {};
+
+    state.hasTessellation = false;
+
+    for (const auto &reflectedBlock : program.uniformBlocks) {
+        if (reflectedBlock.size == 0 ||
+            reflectedBlock.size > std::numeric_limits<uint32_t>::max()) {
+            throw std::runtime_error("Invalid Vulkan uniform block size");
+        }
+        uint64_t key =
+            vulkan::bindingKey(reflectedBlock.set, reflectedBlock.binding);
+        vulkan::VulkanUniformBlock block{};
+        block.set = reflectedBlock.set;
+        block.binding = reflectedBlock.binding;
+        block.size = static_cast<uint32_t>(reflectedBlock.size);
+        block.data.resize(reflectedBlock.size, 0);
+        auto buffer =
+            Buffer::create(BufferUsage::UniformBuffer, reflectedBlock.size,
+                           block.data.data(), MemoryUsageType::CPUToGPU);
+        block.buffers.push_back(buffer);
+        block.dirty = false;
+        state.boundBuffers[key] = {
+            .buffer = buffer, .offset = 0, .range = reflectedBlock.size};
+        state.uniformBlocks.emplace(key, std::move(block));
+    }
+
+    if (shaderProgram->isComputeProgram()) {
+        const VkPipelineShaderStageCreateInfo *computeStage = nullptr;
+        for (const auto &stage : program.shaderStages) {
+            if (stage.stage == VK_SHADER_STAGE_COMPUTE_BIT) {
+                computeStage = &stage;
+                break;
+            }
+        }
+
+        if (computeStage == nullptr) {
+            throw std::runtime_error(
+                "Pipeline::build() requires a compute shader stage");
+        }
+
+        VkComputePipelineCreateInfo computePipelineInfo{};
+        computePipelineInfo.sType =
+            VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        computePipelineInfo.stage = *computeStage;
+        computePipelineInfo.layout = program.pipelineLayout;
+
+        computePipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
+        computePipelineInfo.basePipelineIndex = -1;
+
+        VULKAN_GUARD(vkCreateComputePipelines(device.device, VK_NULL_HANDLE, 1,
+                                              &computePipelineInfo, nullptr,
+                                              &state.computePipeline),
+                     "Failed to create Vulkan compute pipeline");
+
+        state.built = true;
+        return;
+    } else {
+        VkVertexInputBindingDescription bindingDescription{
+            .binding = 0,
+            .stride = static_cast<uint32_t>(vertexBinding.stride),
+            .inputRate =
+                vulkan::vertexBindingRateToVk(vertexBinding.inputRate)};
+
+        bool hasInstanceAttributes = false;
+        uint32_t instanceStride = 0;
+        uint32_t instanceDivisor = 1;
+
+        for (const auto &attribute : vertexAttributes) {
+            if (attribute.inputRate != VertexBindingInputRate::Instance) {
+                continue;
+            }
+
+            uint32_t divisor = std::max(attribute.divisor, 1u);
+            uint32_t stride = static_cast<uint32_t>(attribute.stride);
+            if (stride == 0) {
+                throw std::runtime_error(
+                    "Vulkan instance attribute stride must be positive");
+            }
+            if (hasInstanceAttributes &&
+                (instanceDivisor != divisor || instanceStride != stride)) {
+                throw std::runtime_error("Vulkan instance attributes must use "
+                                         "one stride and divisor");
+            }
+            hasInstanceAttributes = true;
+            instanceStride = stride;
+            instanceDivisor = divisor;
+        }
+        state.vertexBindings = {bindingDescription};
+        if (hasInstanceAttributes) {
+            VkVertexInputBindingDescription instanceBindingDescription{
+                .binding = 1,
+                .stride = instanceStride,
+                .inputRate = VK_VERTEX_INPUT_RATE_INSTANCE};
+            state.vertexBindings.push_back(instanceBindingDescription);
+            if (instanceDivisor > 1) {
+                if (!device.physicalDeviceInfo.hasVertexAttributeDivisor) {
+                    throw std::runtime_error("Selected Vulkan device does not "
+                                             "support instance divisors");
+                }
+                state.vertexDivisors.push_back(
+                    {.binding = 1, .divisor = instanceDivisor});
+            }
+        }
+
+        for (VertexAttribute &attribute : vertexAttributes) {
+            VkVertexInputAttributeDescription attributeDescription{
+                .location = static_cast<uint32_t>(attribute.location),
+                .binding = static_cast<uint32_t>(
+                    attribute.inputRate == VertexBindingInputRate::Instance
+                        ? 1
+                        : 0),
+                .format = vulkan::vertexAttributeFormatToVk(
+                    attribute.type, attribute.size, attribute.normalized),
+                .offset = static_cast<uint32_t>(attribute.offset)};
+            state.vertexAttributes.push_back(attributeDescription);
+        }
+
+        state.inputAssembly.sType =
+            VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        state.inputAssembly.topology =
+            vulkan::primitiveStyleToVk(primitiveStyle);
+        if (primitiveStyle == PrimitiveStyle::TriangleFan &&
+            device.physicalDeviceInfo.hasPortabilitySubset &&
+            !device.physicalDeviceInfo.portabilityFeatures.triangleFans) {
+            throw std::runtime_error(
+                "Selected Vulkan device does not support triangle fans");
+        }
+        state.inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+        state.dynamicStates = {VK_DYNAMIC_STATE_VIEWPORT,
+                               VK_DYNAMIC_STATE_SCISSOR,
+                               VK_DYNAMIC_STATE_DEPTH_BIAS};
+
+        state.viewport = {};
+
+        state.viewport.sType =
+            VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+
+        state.viewport.viewportCount = 1;
+        state.viewport.pViewports = nullptr;
+
+        state.viewport.scissorCount = 1;
+        state.viewport.pScissors = nullptr;
+
+        state.rasterization.sType =
+            VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        state.rasterization.depthClampEnable = VK_FALSE;
+        state.rasterization.rasterizerDiscardEnable = VK_FALSE;
+        state.rasterization.cullMode = vulkan::cullModeToVk(cullMode);
+        state.rasterization.frontFace = vulkan::frontFaceToVk(frontFace);
+        state.rasterization.depthBiasEnable =
+            polygonOffsetEnabled ? VK_TRUE : VK_FALSE;
+        state.rasterization.polygonMode =
+            vulkan::rasterizerModeToVk(rasterizerMode);
+        if (rasterizerMode != RasterizerMode::Fill &&
+            !device.physicalDeviceInfo.features.features.fillModeNonSolid) {
+            throw std::runtime_error(
+                "Selected Vulkan device does not support non-solid fill modes");
+        }
+        if (lineWidth != 1.0f &&
+            !device.physicalDeviceInfo.features.features.wideLines) {
+            throw std::runtime_error(
+                "Selected Vulkan device does not support wide lines");
+        }
+        state.rasterization.lineWidth = lineWidth;
+
+        state.depthStencil.sType =
+            VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+        state.depthStencil.depthTestEnable =
+            depthTestEnabled ? VK_TRUE : VK_FALSE;
+        state.depthStencil.depthWriteEnable =
+            depthWriteEnabled ? VK_TRUE : VK_FALSE;
+        state.depthStencil.depthCompareOp =
+            vulkan::compareOpToVk(depthCompareOp);
+        state.depthStencil.depthBoundsTestEnable = VK_FALSE;
+        state.depthStencil.stencilTestEnable = VK_FALSE;
+
+        state.colorBlendAttachment.blendEnable =
+            blendingEnabled ? VK_TRUE : VK_FALSE;
+        state.colorBlendAttachment.srcColorBlendFactor =
+            vulkan::blenderFuncToVk(blendSrcFactor);
+        state.colorBlendAttachment.dstColorBlendFactor =
+            vulkan::blenderFuncToVk(blendDstFactor);
+        state.colorBlendAttachment.colorBlendOp =
+            vulkan::blenderOpToVk(blendEquation);
+        state.colorBlendAttachment.srcAlphaBlendFactor =
+            vulkan::blenderFuncToVk(blendSrcFactor);
+        state.colorBlendAttachment.dstAlphaBlendFactor =
+            vulkan::blenderFuncToVk(blendDstFactor);
+        state.colorBlendAttachment.alphaBlendOp =
+            vulkan::blenderOpToVk(blendEquation);
+
+        state.colorBlendAttachment.colorWriteMask =
+            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+        if (primitiveStyle == PrimitiveStyle::Patches) {
+            if (!device.physicalDeviceInfo.features.features
+                     .tessellationShader) {
+                throw std::runtime_error(
+                    "Selected Vulkan device does not support tessellation");
+            }
+            state.hasTessellation = true;
+
+            state.tessellation = {};
+            state.tessellation.sType =
+                VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+
+            state.tessellation.patchControlPoints =
+                static_cast<uint32_t>(patchVertices);
+        }
+
+        state.built = true;
+    }
 #endif
 }
 
@@ -800,6 +1068,17 @@ void Pipeline::bind() {
     state.depthTestEnabled = this->depthTestEnabled;
     state.depthWriteEnabled = this->depthWriteEnabled;
     state.depthCompare = desiredDepthCompare;
+#elif VULKAN
+    auto &state = vulkan::pipelineState(this);
+
+    if (!state.built) {
+        throw std::runtime_error(
+            "Pipeline::bind() called before Pipeline::build()");
+    }
+
+    if (shaderProgram == nullptr) {
+        throw std::runtime_error("Pipeline::bind() requires a shader program");
+    }
 #endif
 }
 
@@ -861,6 +1140,8 @@ void Pipeline::setUniform1f(const std::string &name, float v0) {
         glGetUniformLocation(this->shaderProgram->programID, name.c_str()), v0);
 #elif defined(METAL)
     updateMetalUniform(this, name, &v0, sizeof(float), true);
+#elif VULKAN
+    vulkan::updateVulkanUniform(this, name, &v0, sizeof(float), true);
 #endif
 }
 
@@ -872,6 +1153,9 @@ void Pipeline::setUniformMat4f(const std::string &name,
         GL_FALSE, &matrix[0][0]);
 #elif defined(METAL)
     updateMetalUniform(this, name, &matrix[0][0], sizeof(glm::mat4), true);
+#elif defined(VULKAN)
+    vulkan::updateVulkanUniform(this, name, &matrix[0][0], sizeof(glm::mat4),
+                                true);
 #endif
 }
 
@@ -884,6 +1168,9 @@ void Pipeline::setUniform3f(const std::string &name, float v0, float v1,
 #elif defined(METAL)
     float data[3] = {v0, v1, v2};
     updateMetalUniform(this, name, data, sizeof(data), true);
+#elif defined(VULKAN)
+    float data[3] = {v0, v1, v2};
+    vulkan::updateVulkanUniform(this, name, data, sizeof(data), true);
 #endif
 }
 
@@ -893,6 +1180,8 @@ void Pipeline::setUniform1i(const std::string &name, int v0) {
         glGetUniformLocation(this->shaderProgram->programID, name.c_str()), v0);
 #elif defined(METAL)
     updateMetalUniform(this, name, &v0, sizeof(int), true);
+#elif defined(VULKAN)
+    vulkan::updateVulkanUniform(this, name, &v0, sizeof(int), true);
 #endif
 }
 
@@ -904,6 +1193,9 @@ void Pipeline::setUniformBool(const std::string &name, bool value) {
 #elif defined(METAL)
     int intValue = value ? 1 : 0;
     updateMetalUniform(this, name, &intValue, sizeof(int), true);
+#elif defined(VULKAN)
+    int intValue = value ? 1 : 0;
+    vulkan::updateVulkanUniform(this, name, &intValue, sizeof(int), true);
 #endif
 }
 
@@ -916,6 +1208,9 @@ void Pipeline::setUniform4f(const std::string &name, float v0, float v1,
 #elif defined(METAL)
     float data[4] = {v0, v1, v2, v3};
     updateMetalUniform(this, name, data, sizeof(data), true);
+#elif defined(VULKAN)
+    float data[4] = {v0, v1, v2, v3};
+    vulkan::updateVulkanUniform(this, name, data, sizeof(data), true);
 #endif
 }
 
@@ -927,6 +1222,9 @@ void Pipeline::setUniform2f(const std::string &name, float v0, float v1) {
 #elif defined(METAL)
     float data[2] = {v0, v1};
     updateMetalUniform(this, name, data, sizeof(data), true);
+#elif defined(VULKAN)
+    float data[2] = {v0, v1};
+    vulkan::updateVulkanUniform(this, name, data, sizeof(data), true);
 #endif
 }
 
@@ -942,6 +1240,8 @@ void Pipeline::bindBufferData(const std::string &name, const void *data,
     (void)size;
 #elif defined(METAL)
     updateMetalUniform(this, name, data, size, false);
+#elif defined(VULKAN)
+    vulkan::updateVulkanUniform(this, name, data, size, false);
 #endif
 }
 
@@ -1010,6 +1310,62 @@ void Pipeline::bindBuffer(const std::string &name,
     if (!matchedStage) {
         throw std::runtime_error("Metal buffer binding not found: " + name);
     }
+#elif VULKAN
+    (void)callerId;
+
+    if (!shaderProgram) {
+        throw std::runtime_error(
+            "bindBuffer(opal::Buffer) requires a shader program");
+    }
+
+    auto &programState = vulkan::programState(shaderProgram.get());
+    auto bindingIt = programState.bindingsByName.find(name);
+    if (bindingIt == programState.bindingsByName.end()) {
+        throw std::runtime_error("Vulkan buffer binding not found: " + name);
+    }
+
+    const auto &binding = bindingIt->second;
+
+    if (binding.type != vulkan::ShaderResourceType::UniformBuffer &&
+        binding.type != vulkan::ShaderResourceType::StorageBuffer) {
+        throw std::runtime_error(
+            "bindBuffer(opal::Buffer) requires a uniform or storage buffer "
+            "binding");
+    }
+
+    auto &pipelineState = vulkan::pipelineState(this);
+
+    uint64_t key = vulkan::bindingKey(binding.set, binding.binding);
+
+    if (buffer == nullptr) {
+        pipelineState.boundBuffers.erase(key);
+        pipelineState.descriptorsDirty = true;
+        return;
+    }
+
+    auto &bufferState = vulkan::bufferState(buffer.get());
+    if (bufferState.buffer == VK_NULL_HANDLE) {
+        throw std::runtime_error(
+            "Attempted to bind uninitialized Vulkan buffer");
+    }
+
+    if (binding.type == vulkan::ShaderResourceType::UniformBuffer) {
+        if (!(bufferState.usageFlags & VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) {
+            throw std::runtime_error("Buffer '" + name +
+                                     "' is not a Vulkan uniform buffer");
+        }
+
+    } else {
+        if (!(bufferState.usageFlags & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) {
+            throw std::runtime_error("Buffer '" + name +
+                                     "' is not a Vulkan storage buffer");
+        }
+    }
+
+    pipelineState.boundBuffers[key] = {
+        .buffer = buffer, .offset = 0, .range = VK_WHOLE_SIZE};
+
+    pipelineState.descriptorsDirty = true;
 #endif
 }
 
@@ -1051,6 +1407,32 @@ void Pipeline::bindShaderReadWriteBuffer(const std::string &name,
         throw std::runtime_error("Metal compute buffer binding not found: " +
                                  name);
     }
+#elif defined(VULKAN)
+    if (!shaderProgram) {
+        throw std::runtime_error(
+            "bindShaderReadWriteBuffer requires a shader program");
+    }
+
+    auto &programState = vulkan::programState(shaderProgram.get());
+
+    auto it = programState.bindingsByName.find(name);
+    if (it == programState.bindingsByName.end()) {
+        throw std::runtime_error("Vulkan storage buffer binding not found: " +
+                                 name);
+    }
+
+    const auto &binding = it->second;
+    if (binding.type != vulkan::ShaderResourceType::StorageBuffer) {
+        throw std::runtime_error(
+            "bindShaderReadWriteBuffer requires a storage buffer");
+    }
+
+    if (!(binding.stages & VK_SHADER_STAGE_COMPUTE_BIT)) {
+        throw std::runtime_error(
+            "bindShaderReadWriteBuffer requires a compute-stage binding");
+    }
+
+    bindBuffer(name, buffer, callerId);
 #else
     (void)name;
     (void)buffer;
@@ -1059,6 +1441,5 @@ void Pipeline::bindShaderReadWriteBuffer(const std::string &name,
         "bindShaderReadWriteBuffer is only supported on Metal");
 #endif
 }
-
 
 } // namespace opal

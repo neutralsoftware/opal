@@ -7,7 +7,7 @@ build backend="AUTO":
         -DCMAKE_CXX_COMPILER_LAUNCHER= \
         -DOPAL_BACKEND={{backend}} \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-    cmake --build build
+    cmake --build build --parallel
 
 clangd backend="AUTO":
     cmake -S . -B build \

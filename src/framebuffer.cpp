@@ -7,14 +7,18 @@
 // Copyright (c) 2025 maxvdec
 //
 
-#include "opal/opal.h"
-#include <glad/glad.h>
 #include "diagnostics.h"
+#include "opal/opal.h"
 #include <algorithm>
+#include <glad/glad.h>
 #include <memory>
 #include <utility>
 #ifdef METAL
 #include "metal_state.h"
+#endif
+
+#ifdef VULKAN
+#include "vulkan_state.h"
 #endif
 
 namespace opal {
@@ -92,6 +96,21 @@ collectDrawColorAttachments(const std::shared_ptr<Framebuffer> &fb,
     return result;
 }
 
+std::shared_ptr<Texture>
+collectDepthAttachment(const std::shared_ptr<Framebuffer> &framebuffer) {
+    if (framebuffer == nullptr) {
+        return nullptr;
+    }
+    for (const auto &attachment : framebuffer->attachments) {
+        if ((attachment.type == Attachment::Type::Depth ||
+             attachment.type == Attachment::Type::DepthStencil) &&
+            attachment.texture != nullptr) {
+            return attachment.texture;
+        }
+    }
+    return nullptr;
+}
+
 } // namespace
 
 #endif
@@ -99,6 +118,8 @@ collectDrawColorAttachments(const std::shared_ptr<Framebuffer> &fb,
 Framebuffer::~Framebuffer() {
 #ifdef METAL
     metal::releaseFramebufferState(this);
+#elif VULKAN
+    vulkan::releaseFramebufferState(this);
 #endif
 }
 
@@ -118,6 +139,9 @@ std::shared_ptr<Framebuffer> Framebuffer::create(int width, int height) {
 
 #ifdef OPENGL
     glGenFramebuffers(1, &framebuffer->framebufferID);
+#elif VULKAN
+    auto &state = vulkan::framebufferState(framebuffer.get());
+    state.dirty = true;
 #endif
 
     return framebuffer;
@@ -131,6 +155,9 @@ std::shared_ptr<Framebuffer> Framebuffer::create() {
 
 #ifdef OPENGL
     glGenFramebuffers(1, &framebuffer->framebufferID);
+#elif VULKAN
+    auto &state = vulkan::framebufferState(framebuffer.get());
+    state.dirty = true;
 #endif
 
     return framebuffer;
@@ -147,6 +174,9 @@ void Framebuffer::attachTexture(const std::shared_ptr<Texture> &texture,
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 #elif defined(METAL)
     upsertColorAttachment(attachments, attachmentIndex, texture);
+#elif defined(VULKAN)
+    upsertColorAttachment(attachments, attachmentIndex, texture);
+    vulkan::framebufferState(this).dirty = true;
 #endif
 }
 
@@ -178,6 +208,9 @@ void Framebuffer::addAttachment(const Attachment &attachment) {
     attachments.push_back(attachment);
 #elif defined(METAL)
     attachments.push_back(attachment);
+#elif defined(VULKAN)
+    attachments.push_back(attachment);
+    vulkan::framebufferState(this).dirty = true;
 #endif
 }
 
@@ -208,6 +241,9 @@ void Framebuffer::attachCubemap(const std::shared_ptr<Texture> &texture,
     attachments.push_back(att);
 #elif defined(METAL)
     upsertAttachmentByType(attachments, attachmentType, texture);
+#elif defined(VULKAN)
+    upsertAttachmentByType(attachments, attachmentType, texture);
+    vulkan::framebufferState(this).dirty = true;
 #endif
 }
 
@@ -236,6 +272,13 @@ void Framebuffer::attachCubemapFace(const std::shared_ptr<Texture> &texture,
 #elif defined(METAL)
     (void)face;
     upsertAttachmentByType(attachments, attachmentType, texture);
+#elif defined(VULKAN)
+    (void)face;
+    upsertAttachmentByType(attachments, attachmentType, texture);
+    auto &state = vulkan::framebufferState(this);
+
+    state.cubemapFace = face;
+    state.dirty = true;
 #endif
 }
 
@@ -248,6 +291,10 @@ void Framebuffer::disableColorBuffer() {
 #elif defined(METAL)
     colorBufferDisabled = true;
     drawBufferCount = 0;
+#elif defined(VULKAN)
+    colorBufferDisabled = true;
+    drawBufferCount = 0;
+    vulkan::framebufferState(this).dirty = true;
 #endif
 }
 
@@ -255,6 +302,9 @@ void Framebuffer::setViewport() {
 #ifdef OPENGL
     glViewport(0, 0, width, height);
 #elif defined(METAL)
+    width = std::max(width, 1);
+    height = std::max(height, 1);
+#elif defined(VULKAN)
     width = std::max(width, 1);
     height = std::max(height, 1);
 #endif
@@ -272,6 +322,17 @@ void Framebuffer::setViewport(int x, int y, int viewWidth, int viewHeight) {
     if (viewHeight > 0) {
         height = viewHeight;
     }
+#elif defined(VULKAN)
+    auto &state = vulkan::framebufferState(this);
+    state.viewportX = x;
+    state.viewportY = y;
+
+    if (viewWidth > 0) {
+        width = viewWidth;
+    }
+    if (viewHeight > 0) {
+        height = viewHeight;
+    }
 #endif
 }
 
@@ -282,6 +343,32 @@ bool Framebuffer::getStatus() const {
     return status == GL_FRAMEBUFFER_COMPLETE;
 #elif defined(METAL)
     (void)this;
+    return true;
+#elif defined(VULKAN)
+    if (isDefaultFramebuffer) {
+        return true;
+    }
+    if (width <= 0 || height <= 0 || attachments.empty()) {
+        return false;
+    }
+    int samples = -1;
+    for (const auto &attachment : attachments) {
+        if (attachment.texture == nullptr ||
+            attachment.texture->width != width ||
+            attachment.texture->height != height) {
+            return false;
+        }
+        if (samples < 0) {
+            samples = attachment.texture->samples;
+        } else if (samples != attachment.texture->samples) {
+            return false;
+        }
+        const auto &state = vulkan::textureState(attachment.texture.get());
+        if (state.image == VK_NULL_HANDLE ||
+            state.imageView == VK_NULL_HANDLE) {
+            return false;
+        }
+    }
     return true;
 #else
     return false;
@@ -353,6 +440,8 @@ void Framebuffer::setDrawBuffers(int attachmentCount) {
     glDrawBuffers(attachmentCount, drawBuffers.data());
 #elif defined(METAL)
     (void)attachmentCount;
+#elif defined(VULKAN)
+    vulkan::framebufferState(this).dirty = true;
 #endif
 }
 
@@ -548,6 +637,127 @@ void CommandBuffer::performResolve(
         if (resolvePool != nullptr) {
             resolvePool->release();
             resolvePool = nullptr;
+        }
+    }
+#elif defined(VULKAN)
+    if (action == nullptr || action->source == nullptr ||
+        action->destination == nullptr) {
+        return;
+    }
+    auto &command = vulkan::commandBufferState(this);
+    if (!command.recording) {
+        throw std::runtime_error("performResolve requires command recording");
+    }
+    if (command.rendering) {
+        endPass();
+    }
+
+    auto copyTexture = [&](const std::shared_ptr<Texture> &source,
+                           const std::shared_ptr<Texture> &destination) {
+        auto &sourceState = vulkan::textureState(source.get());
+        auto &destinationState = vulkan::textureState(destination.get());
+        if (sourceState.sampleCount != destinationState.sampleCount ||
+            sourceState.format != destinationState.format) {
+            throw std::runtime_error(
+                "Vulkan texture copy requires matching formats and samples");
+        }
+        VkImageLayout sourceLayout = sourceState.layout;
+        VkImageLayout destinationLayout = destinationState.layout;
+        vulkan::transitionTexture(command.commandBuffer, sourceState,
+                                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        vulkan::transitionTexture(command.commandBuffer, destinationState,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkImageCopy region{};
+        region.srcSubresource.aspectMask = sourceState.aspectMask;
+        region.srcSubresource.layerCount =
+            std::min(sourceState.arrayLayers, destinationState.arrayLayers);
+        region.dstSubresource.aspectMask = destinationState.aspectMask;
+        region.dstSubresource.layerCount = region.srcSubresource.layerCount;
+        region.extent = {std::min(sourceState.width, destinationState.width),
+                         std::min(sourceState.height, destinationState.height),
+                         std::min(sourceState.depth, destinationState.depth)};
+        vkCmdCopyImage(command.commandBuffer, sourceState.image,
+                       sourceState.layout, destinationState.image,
+                       destinationState.layout, 1, &region);
+        vulkan::transitionTexture(command.commandBuffer, sourceState,
+                                  sourceLayout);
+        vulkan::transitionTexture(command.commandBuffer, destinationState,
+                                  destinationLayout);
+    };
+
+    auto resolveTexture = [&](const std::shared_ptr<Texture> &source,
+                              const std::shared_ptr<Texture> &destination,
+                              bool depth) {
+        auto &sourceState = vulkan::textureState(source.get());
+        auto &destinationState = vulkan::textureState(destination.get());
+        if (sourceState.sampleCount == VK_SAMPLE_COUNT_1_BIT ||
+            destinationState.sampleCount != VK_SAMPLE_COUNT_1_BIT ||
+            sourceState.format != destinationState.format) {
+            throw std::runtime_error("Vulkan resolve requires matching "
+                                     "multisample and single-sample textures");
+        }
+        VkImageLayout sourceLayout = sourceState.layout;
+        VkImageLayout destinationLayout = destinationState.layout;
+        VkImageLayout attachmentLayout =
+            depth ? VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL
+                  : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        vulkan::transitionTexture(command.commandBuffer, sourceState,
+                                  attachmentLayout);
+        vulkan::transitionTexture(command.commandBuffer, destinationState,
+                                  attachmentLayout);
+        VkRenderingAttachmentInfo attachment{};
+        attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        attachment.imageView = sourceState.imageView;
+        attachment.imageLayout = attachmentLayout;
+        attachment.resolveMode = depth ? VK_RESOLVE_MODE_SAMPLE_ZERO_BIT
+                                       : VK_RESOLVE_MODE_AVERAGE_BIT;
+        attachment.resolveImageView = destinationState.imageView;
+        attachment.resolveImageLayout = attachmentLayout;
+        attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        VkRenderingInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+        info.renderArea.extent = {
+            std::min(sourceState.width, destinationState.width),
+            std::min(sourceState.height, destinationState.height)};
+        info.layerCount = 1;
+        if (depth) {
+            info.pDepthAttachment = &attachment;
+        } else {
+            info.colorAttachmentCount = 1;
+            info.pColorAttachments = &attachment;
+        }
+        vkCmdBeginRendering(command.commandBuffer, &info);
+        vkCmdEndRendering(command.commandBuffer);
+        vulkan::transitionTexture(command.commandBuffer, sourceState,
+                                  sourceLayout);
+        vulkan::transitionTexture(command.commandBuffer, destinationState,
+                                  destinationLayout);
+    };
+
+    if (action->resolveColor) {
+        auto sources = collectDrawColorAttachments(
+            action->source, action->colorAttachmentIndex);
+        auto destinations = collectDrawColorAttachments(
+            action->destination, action->colorAttachmentIndex);
+        size_t count = std::min(sources.size(), destinations.size());
+        for (size_t index = 0; index < count; ++index) {
+            if (sources[index]->samples > 1) {
+                resolveTexture(sources[index], destinations[index], false);
+            } else {
+                copyTexture(sources[index], destinations[index]);
+            }
+        }
+    }
+    if (action->resolveDepth) {
+        auto source = collectDepthAttachment(action->source);
+        auto destination = collectDepthAttachment(action->destination);
+        if (source != nullptr && destination != nullptr) {
+            if (source->samples > 1) {
+                resolveTexture(source, destination, true);
+            } else {
+                copyTexture(source, destination);
+            }
         }
     }
 #endif

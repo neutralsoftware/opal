@@ -27,6 +27,9 @@ FetchContent_Declare(
     opal
     GIT_REPOSITORY https://github.com/neutralsoftware/opal.git
     GIT_TAG main
+
+    GIT_SUBMODULES third_party/slang
+    GIT_SUBMODULES_RECURSE TRUE
 )
 
 set(OPAL_BACKEND AUTO CACHE STRING "Opal rendering backend")

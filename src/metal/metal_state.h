@@ -130,7 +130,8 @@ struct PipelineState {
     MTL::Buffer *textureArgumentBuffer = nullptr;
     uint32_t textureArgumentBufferIndex = 0;
     std::vector<std::shared_ptr<Texture>> textureArgumentTextures;
-    std::unordered_map<uint32_t, std::shared_ptr<PrimitiveAccelerationStructure>>
+    std::unordered_map<uint32_t,
+                       std::shared_ptr<PrimitiveAccelerationStructure>>
         primitiveAccelerationStructures;
     std::unordered_map<uint32_t, std::shared_ptr<InstanceAccelerationStructure>>
         instanceAccelerationStructures;
@@ -217,7 +218,8 @@ bool parseProgramLayouts(const std::string &vertexSource,
 bool parseComputeProgramLayouts(const std::string &computeSource,
                                 ProgramState &programState);
 std::vector<BufferBinding>
-resolveBufferBindings(const ProgramState &programState, const std::string &name);
+resolveBufferBindings(const ProgramState &programState,
+                      const std::string &name);
 std::vector<UniformLocation> resolveUniformLocations(ProgramState &programState,
                                                      const std::string &name);
 

@@ -7,17 +7,24 @@
 // Copyright (c) 2025 maxvdec
 //
 
-#include "opal/opal.h"
 #include "diagnostics.h"
-#include <glad/glad.h>
+#include "opal/opal.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <glad/glad.h>
 #include <memory>
+#include <stdexcept>
 #include <sys/types.h>
+#include <vector>
 #ifdef METAL
 #include "metal_state.h"
+#endif
+
+#ifdef VULKAN
+#include "vulkan_state.h"
+#include <vulkan/vulkan.h>
 #endif
 
 namespace opal {
@@ -25,6 +32,8 @@ namespace opal {
 Texture::~Texture() {
 #ifdef METAL
     metal::releaseTextureState(this);
+#elif VULKAN
+    vulkan::releaseTextureState(this);
 #endif
 }
 
@@ -320,6 +329,693 @@ MetalUploadBuffer prepareMetalUpload(const void *data, int width, int height,
 }
 #endif
 
+#ifdef VULKAN
+struct VulkanTransferBuffer {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+};
+
+struct VulkanUploadData {
+    std::vector<uint8_t> bytes;
+};
+
+uint16_t floatToHalf(float value) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    uint32_t sign = (bits >> 16) & 0x8000u;
+    uint32_t mantissa = bits & 0x007fffffu;
+    int32_t exponent =
+        static_cast<int32_t>((bits >> 23) & 0xffu) - 127 + 15;
+    if (exponent <= 0) {
+        if (exponent < -10) {
+            return static_cast<uint16_t>(sign);
+        }
+        mantissa = (mantissa | 0x00800000u) >> (1 - exponent);
+        if ((mantissa & 0x00001000u) != 0u) {
+            mantissa += 0x00002000u;
+        }
+        return static_cast<uint16_t>(sign | (mantissa >> 13));
+    }
+    if (exponent >= 31) {
+        if (mantissa == 0u) {
+            return static_cast<uint16_t>(sign | 0x7c00u);
+        }
+        mantissa >>= 13;
+        return static_cast<uint16_t>(sign | 0x7c00u | mantissa |
+                                     (mantissa == 0u));
+    }
+    if ((mantissa & 0x00001000u) != 0u) {
+        mantissa += 0x00002000u;
+        if ((mantissa & 0x00800000u) != 0u) {
+            mantissa = 0u;
+            ++exponent;
+            if (exponent >= 31) {
+                return static_cast<uint16_t>(sign | 0x7c00u);
+            }
+        }
+    }
+    return static_cast<uint16_t>(
+        sign | (static_cast<uint32_t>(exponent) << 10) | (mantissa >> 13));
+}
+
+float halfToFloat(uint16_t value) {
+    uint32_t sign = static_cast<uint32_t>(value & 0x8000u) << 16;
+    int32_t exponent = static_cast<int32_t>((value >> 10) & 0x1fu);
+    uint32_t mantissa = value & 0x03ffu;
+    uint32_t bits = 0;
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            bits = sign;
+        } else {
+            exponent = 1;
+            while ((mantissa & 0x0400u) == 0) {
+                mantissa <<= 1;
+                --exponent;
+            }
+            mantissa &= 0x03ffu;
+            bits = sign |
+                   (static_cast<uint32_t>(exponent + 112) << 23) |
+                   (mantissa << 13);
+        }
+    } else if (exponent == 31) {
+        bits = sign | 0x7f800000u | (mantissa << 13);
+    } else {
+        bits = sign | (static_cast<uint32_t>(exponent + 112) << 23) |
+               (mantissa << 13);
+    }
+    float result = 0.0f;
+    std::memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
+size_t dataFormatChannels(TextureDataFormat format) {
+    switch (format) {
+    case TextureDataFormat::Rgba:
+    case TextureDataFormat::Bgra:
+        return 4;
+    case TextureDataFormat::Rgb:
+    case TextureDataFormat::Bgr:
+        return 3;
+    case TextureDataFormat::Red:
+    case TextureDataFormat::DepthComponent:
+        return 1;
+    }
+    throw std::runtime_error("Unsupported Vulkan texture data format");
+}
+
+size_t textureFormatChannels(TextureFormat format) {
+    switch (format) {
+    case TextureFormat::Rgba8:
+    case TextureFormat::sRgba8:
+    case TextureFormat::Rgba16F:
+        return 4;
+    case TextureFormat::Rgb8:
+    case TextureFormat::sRgb8:
+    case TextureFormat::Rgb16F:
+        return 4;
+    default:
+        return 1;
+    }
+}
+
+bool isHalfTextureFormat(TextureFormat format) {
+    return format == TextureFormat::Rgba16F ||
+           format == TextureFormat::Rgb16F ||
+           format == TextureFormat::Red16F;
+}
+
+bool isDepthTextureFormat(TextureFormat format) {
+    return format == TextureFormat::Depth24Stencil8 ||
+           format == TextureFormat::DepthComponent24 ||
+           format == TextureFormat::Depth32F;
+}
+
+size_t sourceChannelSize(TextureFormat format, TextureDataFormat dataFormat) {
+    if (isHalfTextureFormat(format) ||
+        dataFormat == TextureDataFormat::DepthComponent) {
+        return sizeof(float);
+    }
+    return sizeof(uint8_t);
+}
+
+float readSourceChannel(const uint8_t *source, size_t channelSize) {
+    if (channelSize == sizeof(float)) {
+        float value = 0.0f;
+        std::memcpy(&value, source, sizeof(value));
+        return value;
+    }
+    return static_cast<float>(*source) / 255.0f;
+}
+
+VulkanUploadData prepareVulkanUpload(const void *data, size_t texelCount,
+                                     TextureFormat format,
+                                     TextureDataFormat dataFormat) {
+    VulkanUploadData upload{};
+    if (data == nullptr || texelCount == 0) {
+        return upload;
+    }
+
+    size_t sourceChannels = dataFormatChannels(dataFormat);
+    size_t destinationChannels = textureFormatChannels(format);
+    size_t channelSize = sourceChannelSize(format, dataFormat);
+    size_t destinationSize = vulkan::bytesPerPixel(format);
+    upload.bytes.resize(texelCount * destinationSize);
+
+    const auto *sourceBytes = static_cast<const uint8_t *>(data);
+    for (size_t texel = 0; texel < texelCount; ++texel) {
+        float channels[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        for (size_t channel = 0; channel < sourceChannels; ++channel) {
+            size_t sourceChannel = channel;
+            if (dataFormat == TextureDataFormat::Bgr ||
+                dataFormat == TextureDataFormat::Bgra) {
+                if (channel == 0) {
+                    sourceChannel = 2;
+                } else if (channel == 2) {
+                    sourceChannel = 0;
+                }
+            }
+            channels[channel] = readSourceChannel(
+                sourceBytes +
+                    ((texel * sourceChannels + sourceChannel) * channelSize),
+                channelSize);
+        }
+
+        uint8_t *destination =
+            upload.bytes.data() + texel * destinationSize;
+        if (format == TextureFormat::Depth32F) {
+            std::memcpy(destination, channels, sizeof(float));
+        } else if (format == TextureFormat::DepthComponent24 ||
+                   format == TextureFormat::Depth24Stencil8) {
+            uint32_t depth = static_cast<uint32_t>(
+                std::clamp(channels[0], 0.0f, 1.0f) * 16777215.0f);
+            uint32_t packed = format == TextureFormat::DepthComponent24
+                                  ? depth << 8
+                                  : depth;
+            std::memcpy(destination, &packed, sizeof(packed));
+        } else if (isHalfTextureFormat(format)) {
+            for (size_t channel = 0; channel < destinationChannels; ++channel) {
+                uint16_t half = floatToHalf(channels[channel]);
+                std::memcpy(destination + channel * sizeof(uint16_t), &half,
+                            sizeof(half));
+            }
+        } else {
+            for (size_t channel = 0; channel < destinationChannels; ++channel) {
+                destination[channel] = static_cast<uint8_t>(std::lround(
+                    std::clamp(channels[channel], 0.0f, 1.0f) * 255.0f));
+            }
+        }
+    }
+    return upload;
+}
+
+void createTransferBuffer(vulkan::DeviceState &deviceState, VkDeviceSize size,
+                          VkBufferUsageFlags usage,
+                          VkMemoryPropertyFlags properties,
+                          VulkanTransferBuffer &buffer) {
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = size;
+    bufferInfo.usage = usage;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VULKAN_GUARD(vkCreateBuffer(deviceState.device, &bufferInfo, nullptr,
+                                &buffer.buffer),
+                 "Failed to create Vulkan transfer buffer");
+
+    VkMemoryRequirements requirements{};
+    vkGetBufferMemoryRequirements(deviceState.device, buffer.buffer,
+                                  &requirements);
+    VkMemoryAllocateInfo allocationInfo{};
+    allocationInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocationInfo.allocationSize = requirements.size;
+    allocationInfo.memoryTypeIndex = vulkan::findMemoryType(
+        deviceState.physicalDeviceInfo.device, requirements.memoryTypeBits,
+        properties);
+
+    VkResult result = vkAllocateMemory(deviceState.device, &allocationInfo,
+                                       nullptr, &buffer.memory);
+    if (result != VK_SUCCESS) {
+        vkDestroyBuffer(deviceState.device, buffer.buffer, nullptr);
+        buffer.buffer = VK_NULL_HANDLE;
+        VULKAN_GUARD(result, "Failed to allocate Vulkan transfer memory");
+    }
+    VULKAN_GUARD(vkBindBufferMemory(deviceState.device, buffer.buffer,
+                                    buffer.memory, 0),
+                 "Failed to bind Vulkan transfer memory");
+}
+
+void destroyTransferBuffer(vulkan::DeviceState &deviceState,
+                           VulkanTransferBuffer &buffer) {
+    if (buffer.buffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(deviceState.device, buffer.buffer, nullptr);
+    }
+    if (buffer.memory != VK_NULL_HANDLE) {
+        vkFreeMemory(deviceState.device, buffer.memory, nullptr);
+    }
+    buffer = {};
+}
+
+VkImageLayout defaultVulkanTextureLayout(const vulkan::TextureState &state) {
+    return isDepthTextureFormat(state.opalFormat)
+               ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+               : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+}
+
+void layoutAccess(VkImageLayout layout, VkPipelineStageFlags2 &stage,
+                  VkAccessFlags2 &access) {
+    switch (layout) {
+    case VK_IMAGE_LAYOUT_UNDEFINED:
+        stage = VK_PIPELINE_STAGE_2_NONE;
+        access = VK_ACCESS_2_NONE;
+        break;
+    case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+        stage = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        access = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        break;
+    case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+        stage = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        access = VK_ACCESS_2_TRANSFER_READ_BIT;
+        break;
+    case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+        stage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        access = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+        break;
+    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+        stage = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+        access = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        break;
+    default:
+        stage = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        access = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT |
+                 VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+        break;
+    }
+}
+
+void transitionVulkanImage(VkCommandBuffer commandBuffer,
+                           vulkan::TextureState &state, VkImageLayout oldLayout,
+                           VkImageLayout newLayout, uint32_t baseMipLevel,
+                           uint32_t levelCount, uint32_t baseArrayLayer,
+                           uint32_t layerCount) {
+    VkImageMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    layoutAccess(oldLayout, barrier.srcStageMask, barrier.srcAccessMask);
+    layoutAccess(newLayout, barrier.dstStageMask, barrier.dstAccessMask);
+    barrier.oldLayout = oldLayout;
+    barrier.newLayout = newLayout;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = state.image;
+    barrier.subresourceRange.aspectMask = state.aspectMask;
+    barrier.subresourceRange.baseMipLevel = baseMipLevel;
+    barrier.subresourceRange.levelCount = levelCount;
+    barrier.subresourceRange.baseArrayLayer = baseArrayLayer;
+    barrier.subresourceRange.layerCount = layerCount;
+
+    VkDependencyInfo dependencyInfo{};
+    dependencyInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependencyInfo.imageMemoryBarrierCount = 1;
+    dependencyInfo.pImageMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
+}
+
+VkImageAspectFlags transferAspect(const vulkan::TextureState &state) {
+    return (state.aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT) != 0
+               ? VK_IMAGE_ASPECT_DEPTH_BIT
+               : VK_IMAGE_ASPECT_COLOR_BIT;
+}
+
+VkImageViewType imageViewType(TextureType type) {
+    switch (type) {
+    case TextureType::TextureCubeMap:
+        return VK_IMAGE_VIEW_TYPE_CUBE;
+    case TextureType::Texture3D:
+        return VK_IMAGE_VIEW_TYPE_3D;
+    case TextureType::Texture2DArray:
+        return VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    default:
+        return VK_IMAGE_VIEW_TYPE_2D;
+    }
+}
+
+VkSamplerAddressMode samplerAddressMode(TextureWrapMode mode) {
+    switch (mode) {
+    case TextureWrapMode::Repeat:
+        return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    case TextureWrapMode::MirroredRepeat:
+        return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+    case TextureWrapMode::ClampToEdge:
+        return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    case TextureWrapMode::ClampToBorder:
+        return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    }
+    return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+}
+
+VkFilter samplerFilter(TextureFilterMode mode) {
+    return mode == TextureFilterMode::Nearest ||
+                   mode == TextureFilterMode::NearestMipmapNearest
+               ? VK_FILTER_NEAREST
+               : VK_FILTER_LINEAR;
+}
+
+VkSamplerMipmapMode samplerMipmapMode(TextureFilterMode mode) {
+    return mode == TextureFilterMode::LinearMipmapLinear
+               ? VK_SAMPLER_MIPMAP_MODE_LINEAR
+               : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+}
+
+VkBorderColor samplerBorderColor(const glm::vec4 &color) {
+    if (color.a <= 0.0f) {
+        return VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+    }
+    if (color.r >= 0.5f && color.g >= 0.5f && color.b >= 0.5f) {
+        return VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+    }
+    return VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+}
+
+void rebuildVulkanSampler(Texture *texture) {
+    auto &deviceState = vulkan::deviceState(Device::globalInstance);
+    auto &state = vulkan::textureState(texture);
+    if (state.sampler != VK_NULL_HANDLE) {
+        vkDestroySampler(deviceState.device, state.sampler, nullptr);
+        state.sampler = VK_NULL_HANDLE;
+    }
+    if (state.type == TextureType::Texture2DMultisample) {
+        return;
+    }
+
+    VkSamplerCreateInfo samplerInfo{};
+    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerInfo.magFilter = samplerFilter(state.magFilter);
+    samplerInfo.minFilter = samplerFilter(state.minFilter);
+    samplerInfo.mipmapMode = samplerMipmapMode(state.minFilter);
+    samplerInfo.addressModeU = samplerAddressMode(state.wrapS);
+    samplerInfo.addressModeV = samplerAddressMode(state.wrapT);
+    samplerInfo.addressModeW = samplerAddressMode(state.wrapR);
+    samplerInfo.mipLodBias = 0.0f;
+    samplerInfo.anisotropyEnable =
+        deviceState.physicalDeviceInfo.features.features.samplerAnisotropy;
+    samplerInfo.maxAnisotropy = samplerInfo.anisotropyEnable
+                                    ? deviceState.physicalDeviceInfo.properties
+                                          .limits.maxSamplerAnisotropy
+                                    : 1.0f;
+    samplerInfo.compareEnable = VK_FALSE;
+    samplerInfo.minLod = 0.0f;
+    samplerInfo.maxLod = static_cast<float>(state.mipLevels);
+    samplerInfo.borderColor = samplerBorderColor(state.borderColor);
+    samplerInfo.unnormalizedCoordinates = VK_FALSE;
+    VULKAN_GUARD(vkCreateSampler(deviceState.device, &samplerInfo, nullptr,
+                                 &state.sampler),
+                 "Failed to create Vulkan texture sampler");
+    state.generation++;
+}
+
+void destroyVulkanImage(Texture *texture) {
+    auto &deviceState = vulkan::deviceState(Device::globalInstance);
+    auto &state = vulkan::textureState(texture);
+    if (state.imageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(deviceState.device, state.imageView, nullptr);
+        state.imageView = VK_NULL_HANDLE;
+    }
+    if (state.sampler != VK_NULL_HANDLE) {
+        vkDestroySampler(deviceState.device, state.sampler, nullptr);
+        state.sampler = VK_NULL_HANDLE;
+    }
+    if (state.image != VK_NULL_HANDLE && state.ownsImage) {
+        vkDestroyImage(deviceState.device, state.image, nullptr);
+        state.image = VK_NULL_HANDLE;
+    }
+    if (state.memory != VK_NULL_HANDLE && state.ownsImage) {
+        vkFreeMemory(deviceState.device, state.memory, nullptr);
+        state.memory = VK_NULL_HANDLE;
+    }
+    state.ownsImage = false;
+    state.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+}
+
+void createVulkanImage(Texture *texture, int depth) {
+    auto &deviceState = vulkan::deviceState(Device::globalInstance);
+    auto &state = vulkan::textureState(texture);
+    destroyVulkanImage(texture);
+
+    state.width = static_cast<uint32_t>(std::max(texture->width, 1));
+    state.height = static_cast<uint32_t>(std::max(texture->height, 1));
+    state.depth = static_cast<uint32_t>(std::max(depth, 1));
+    state.mipLevels = std::max<uint32_t>(texture->mipLevels, 1);
+    state.arrayLayers = texture->type == TextureType::TextureCubeMap ? 6u : 1u;
+    state.sampleCount = vulkan::sampleCountFlagBitsFor(texture->samples);
+    state.format = vulkan::textureFormatToVkFormat(texture->format);
+    state.aspectMask = vulkan::textureAspectFlagsFor(texture->format);
+    state.opalFormat = texture->format;
+    state.type = texture->type;
+
+    VkSampleCountFlags supportedSamples =
+        isDepthTextureFormat(texture->format)
+            ? deviceState.physicalDeviceInfo.properties.limits
+                  .framebufferDepthSampleCounts
+            : deviceState.physicalDeviceInfo.properties.limits
+                  .framebufferColorSampleCounts;
+    if ((supportedSamples & state.sampleCount) == 0) {
+        throw std::runtime_error(
+            "Requested Vulkan texture sample count is unsupported");
+    }
+
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.flags = texture->type == TextureType::TextureCubeMap
+                          ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT
+                          : 0;
+    imageInfo.imageType = vulkan::textureTypeToVk(texture->type);
+    imageInfo.format = state.format;
+    imageInfo.extent = {state.width, state.height, state.depth};
+    imageInfo.mipLevels = state.mipLevels;
+    imageInfo.arrayLayers = state.arrayLayers;
+    imageInfo.samples = state.sampleCount;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.usage =
+        vulkan::textureUsageFlagsFor(texture->type, texture->format);
+    VkFormatProperties formatProperties{};
+    vkGetPhysicalDeviceFormatProperties(deviceState.physicalDeviceInfo.device,
+                                        state.format, &formatProperties);
+    if ((formatProperties.optimalTilingFeatures &
+         VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) == 0) {
+        imageInfo.usage &= ~VK_IMAGE_USAGE_STORAGE_BIT;
+    }
+    if ((formatProperties.optimalTilingFeatures &
+         VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) == 0) {
+        imageInfo.usage &= ~VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    }
+    if ((formatProperties.optimalTilingFeatures &
+         VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) == 0) {
+        throw std::runtime_error(
+            "Vulkan texture format does not support sampled images");
+    }
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VULKAN_GUARD(
+        vkCreateImage(deviceState.device, &imageInfo, nullptr, &state.image),
+        "Failed to create Vulkan image");
+    state.ownsImage = true;
+
+    VkMemoryRequirements requirements{};
+    vkGetImageMemoryRequirements(deviceState.device, state.image,
+                                 &requirements);
+    VkMemoryAllocateInfo allocationInfo{};
+    allocationInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocationInfo.allocationSize = requirements.size;
+    allocationInfo.memoryTypeIndex = vulkan::findMemoryType(
+        deviceState.physicalDeviceInfo.device, requirements.memoryTypeBits,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    VULKAN_GUARD(vkAllocateMemory(deviceState.device, &allocationInfo, nullptr,
+                                  &state.memory),
+                 "Failed to allocate Vulkan image memory");
+    VULKAN_GUARD(
+        vkBindImageMemory(deviceState.device, state.image, state.memory, 0),
+        "Failed to bind Vulkan image memory");
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = state.image;
+    viewInfo.viewType = imageViewType(texture->type);
+    viewInfo.format = state.format;
+    viewInfo.subresourceRange.aspectMask = state.aspectMask;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = state.mipLevels;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = state.arrayLayers;
+    VULKAN_GUARD(vkCreateImageView(deviceState.device, &viewInfo, nullptr,
+                                   &state.imageView),
+                 "Failed to create Vulkan image view");
+
+    rebuildVulkanSampler(texture);
+    VkCommandBuffer commandBuffer =
+        vulkan::beginSingleTimeCommands(deviceState);
+    VkImageLayout finalLayout = defaultVulkanTextureLayout(state);
+    transitionVulkanImage(commandBuffer, state, VK_IMAGE_LAYOUT_UNDEFINED,
+                          finalLayout, 0, state.mipLevels, 0,
+                          state.arrayLayers);
+    vulkan::endSingleTimeCommands(deviceState, commandBuffer);
+    state.layout = finalLayout;
+    if (state.type == TextureType::Texture2DMultisample) {
+        state.generation++;
+    }
+}
+
+void uploadVulkanTexture(Texture *texture, const void *data, int width,
+                         int height, int depth, uint32_t arrayLayer,
+                         TextureDataFormat dataFormat) {
+    if (data == nullptr || width <= 0 || height <= 0 || depth <= 0) {
+        return;
+    }
+    auto &deviceState = vulkan::deviceState(Device::globalInstance);
+    auto &state = vulkan::textureState(texture);
+    size_t texelCount = static_cast<size_t>(width) *
+                        static_cast<size_t>(height) *
+                        static_cast<size_t>(depth);
+    VulkanUploadData upload =
+        prepareVulkanUpload(data, texelCount, texture->format, dataFormat);
+    VulkanTransferBuffer staging{};
+    createTransferBuffer(deviceState, upload.bytes.size(),
+                         VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                         staging);
+
+    void *mapped = nullptr;
+    VULKAN_GUARD(vkMapMemory(deviceState.device, staging.memory, 0,
+                             upload.bytes.size(), 0, &mapped),
+                 "Failed to map Vulkan texture upload memory");
+    std::memcpy(mapped, upload.bytes.data(), upload.bytes.size());
+    vkUnmapMemory(deviceState.device, staging.memory);
+
+    VkCommandBuffer commandBuffer =
+        vulkan::beginSingleTimeCommands(deviceState);
+    transitionVulkanImage(commandBuffer, state, state.layout,
+                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, 1,
+                          arrayLayer, 1);
+
+    VkBufferImageCopy region{};
+    region.imageSubresource.aspectMask = transferAspect(state);
+    region.imageSubresource.mipLevel = 0;
+    region.imageSubresource.baseArrayLayer = arrayLayer;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent = {static_cast<uint32_t>(width),
+                          static_cast<uint32_t>(height),
+                          static_cast<uint32_t>(depth)};
+    vkCmdCopyBufferToImage(commandBuffer, staging.buffer, state.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    transitionVulkanImage(commandBuffer, state,
+                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, state.layout, 0,
+                          1, arrayLayer, 1);
+    vulkan::endSingleTimeCommands(deviceState, commandBuffer);
+    destroyTransferBuffer(deviceState, staging);
+}
+
+void readVulkanTexture(Texture *texture, void *output,
+                       TextureDataFormat dataFormat) {
+    if (output == nullptr) {
+        return;
+    }
+    auto &deviceState = vulkan::deviceState(Device::globalInstance);
+    auto &state = vulkan::textureState(texture);
+    VkDeviceSize size = static_cast<VkDeviceSize>(state.width) * state.height *
+                        state.depth * vulkan::bytesPerPixel(texture->format);
+    VulkanTransferBuffer staging{};
+    createTransferBuffer(deviceState, size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                         staging);
+
+    VkCommandBuffer commandBuffer =
+        vulkan::beginSingleTimeCommands(deviceState);
+    transitionVulkanImage(commandBuffer, state, state.layout,
+                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0, 1, 0, 1);
+    VkBufferImageCopy region{};
+    region.imageSubresource.aspectMask = transferAspect(state);
+    region.imageSubresource.mipLevel = 0;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent = {state.width, state.height, state.depth};
+    vkCmdCopyImageToBuffer(commandBuffer, state.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging.buffer,
+                           1, &region);
+    transitionVulkanImage(commandBuffer, state,
+                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, state.layout, 0,
+                          1, 0, 1);
+    vulkan::endSingleTimeCommands(deviceState, commandBuffer);
+
+    void *mapped = nullptr;
+    VULKAN_GUARD(vkMapMemory(deviceState.device, staging.memory, 0, size, 0,
+                             &mapped),
+                 "Failed to map Vulkan texture readback memory");
+    size_t texelCount = static_cast<size_t>(state.width) * state.height *
+                        state.depth;
+    size_t sourceChannels = textureFormatChannels(texture->format);
+    size_t outputChannels = dataFormatChannels(dataFormat);
+    size_t outputChannelSize = sourceChannelSize(texture->format, dataFormat);
+    auto *destination = static_cast<uint8_t *>(output);
+    const auto *source = static_cast<const uint8_t *>(mapped);
+    size_t sourceTexelSize = vulkan::bytesPerPixel(texture->format);
+
+    for (size_t texel = 0; texel < texelCount; ++texel) {
+        float channels[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        const uint8_t *sourceTexel = source + texel * sourceTexelSize;
+        if (texture->format == TextureFormat::Depth32F) {
+            std::memcpy(channels, sourceTexel, sizeof(float));
+        } else if (texture->format == TextureFormat::DepthComponent24 ||
+                   texture->format == TextureFormat::Depth24Stencil8) {
+            uint32_t packed = 0;
+            std::memcpy(&packed, sourceTexel, sizeof(packed));
+            uint32_t depth = texture->format == TextureFormat::DepthComponent24
+                                 ? packed >> 8
+                                 : packed & 0x00ffffffu;
+            channels[0] = static_cast<float>(depth) / 16777215.0f;
+        } else if (isHalfTextureFormat(texture->format)) {
+            for (size_t channel = 0; channel < sourceChannels; ++channel) {
+                uint16_t half = 0;
+                std::memcpy(&half,
+                            sourceTexel + channel * sizeof(uint16_t),
+                            sizeof(half));
+                channels[channel] = halfToFloat(half);
+            }
+        } else {
+            for (size_t channel = 0; channel < sourceChannels; ++channel) {
+                channels[channel] =
+                    static_cast<float>(sourceTexel[channel]) / 255.0f;
+            }
+        }
+
+        for (size_t channel = 0; channel < outputChannels; ++channel) {
+            size_t destinationChannel = channel;
+            if (dataFormat == TextureDataFormat::Bgr ||
+                dataFormat == TextureDataFormat::Bgra) {
+                if (channel == 0) {
+                    destinationChannel = 2;
+                } else if (channel == 2) {
+                    destinationChannel = 0;
+                }
+            }
+            uint8_t *outputChannel =
+                destination +
+                ((texel * outputChannels + destinationChannel) *
+                 outputChannelSize);
+            if (outputChannelSize == sizeof(float)) {
+                std::memcpy(outputChannel, &channels[channel], sizeof(float));
+            } else {
+                *outputChannel = static_cast<uint8_t>(std::lround(
+                    std::clamp(channels[channel], 0.0f, 1.0f) * 255.0f));
+            }
+        }
+    }
+
+    vkUnmapMemory(deviceState.device, staging.memory);
+    destroyTransferBuffer(deviceState, staging);
+}
+#endif
+
 } // namespace
 
 std::shared_ptr<Texture> Texture::create(TextureType type, TextureFormat format,
@@ -461,6 +1157,56 @@ std::shared_ptr<Texture> Texture::create(TextureType type, TextureFormat format,
     }
 
     return emitCreated(texture);
+
+#elif VULKAN
+    if (Device::globalInstance == nullptr) {
+        throw std::runtime_error("Cannot create Vulkan texture without device");
+    }
+    if (width <= 0 || height <= 0) {
+        throw std::runtime_error("Vulkan texture dimensions must be positive");
+    }
+    auto &deviceState = vulkan::deviceState(Device::globalInstance);
+    if (deviceState.device == nullptr) {
+        throw std::runtime_error("Vulkan device is not initialized");
+    }
+
+    auto texture = std::make_shared<Texture>();
+    texture->type = type;
+    texture->format = format;
+    texture->width = width;
+    texture->height = height;
+    texture->mipLevels = type == TextureType::Texture2DMultisample
+                             ? 1
+                             : std::max<uint>(1, mipLevels);
+    texture->samples = (type == TextureType::Texture2DMultisample)
+                           ? static_cast<int>(mipLevels)
+                           : 1;
+    if (type != TextureType::Texture2DMultisample) {
+        uint32_t maximumMipLevels =
+            static_cast<uint32_t>(std::floor(std::log2(
+                static_cast<double>(std::max(width, height))))) +
+            1;
+        texture->mipLevels =
+            std::min<uint32_t>(texture->mipLevels, maximumMipLevels);
+    }
+
+    auto &state = vulkan::textureState(texture.get());
+    state.type = type;
+    state.dataFormat = dataFormat;
+    state.opalFormat = format;
+    createVulkanImage(texture.get(), 1);
+    texture->textureID = vulkan::registerTextureHandle(texture);
+
+    if (data != nullptr && type != TextureType::TextureCubeMap &&
+        type != TextureType::Texture2DMultisample) {
+        uploadVulkanTexture(texture.get(), data, width, height, 1, 0,
+                            dataFormat);
+        if (texture->mipLevels > 1) {
+            texture->generateMipmaps(texture->mipLevels);
+        }
+    }
+
+    return emitCreated(texture);
 #else
     return nullptr;
 #endif
@@ -497,6 +1243,19 @@ void Texture::updateFace(int faceIndex, const void *data, int width, int height,
     state.texture->replaceRegion(
         region, 0, static_cast<NS::UInteger>(faceIndex), upload.bytes,
         upload.bytesPerRow, upload.bytesPerImage);
+#elif VULKAN
+    if (type != TextureType::TextureCubeMap || faceIndex < 0 || faceIndex >= 6 ||
+        data == nullptr || width <= 0 || height <= 0) {
+        return;
+    }
+    if (this->width != width || this->height != height) {
+        this->width = width;
+        this->height = height;
+        createVulkanImage(this, 1);
+    }
+    vulkan::textureState(this).dataFormat = dataFormat;
+    uploadVulkanTexture(this, data, width, height, 1,
+                        static_cast<uint32_t>(faceIndex), dataFormat);
 #endif
 
     detail::emit(ResourceEvent{
@@ -534,6 +1293,20 @@ void Texture::updateData3D(const void *data, int width, int height, int depth,
     state.texture->replaceRegion(region, 0, 0, upload.bytes, upload.bytesPerRow,
                                  upload.bytesPerImage);
     state.depth = depth;
+#elif VULKAN
+    if (type != TextureType::Texture3D || data == nullptr || width <= 0 ||
+        height <= 0 || depth <= 0) {
+        return;
+    }
+    auto &state = vulkan::textureState(this);
+    if (this->width != width || this->height != height ||
+        state.depth != static_cast<uint32_t>(depth)) {
+        this->width = width;
+        this->height = height;
+        createVulkanImage(this, depth);
+    }
+    state.dataFormat = dataFormat;
+    uploadVulkanTexture(this, data, width, height, depth, 0, dataFormat);
 #endif
 }
 
@@ -583,6 +1356,20 @@ void Texture::updateData(const void *data, int width, int height,
     this->height = height;
     state.width = width;
     state.height = height;
+#elif VULKAN
+    if (data == nullptr || width <= 0 || height <= 0 ||
+        type == TextureType::TextureCubeMap ||
+        type == TextureType::Texture2DMultisample ||
+        type == TextureType::Texture3D) {
+        return;
+    }
+    if (this->width != width || this->height != height) {
+        this->width = width;
+        this->height = height;
+        createVulkanImage(this, 1);
+    }
+    vulkan::textureState(this).dataFormat = dataFormat;
+    uploadVulkanTexture(this, data, width, height, 1, 0, dataFormat);
 #endif
 }
 
@@ -593,6 +1380,13 @@ void Texture::changeFormat(TextureFormat newFormat) {
 #elif defined(METAL)
     this->format = newFormat;
     metal::textureState(this).format = newFormat;
+#elif VULKAN
+    if (format == newFormat) {
+        return;
+    }
+    int depth = static_cast<int>(vulkan::textureState(this).depth);
+    format = newFormat;
+    createVulkanImage(this, depth);
 #endif
 }
 
@@ -642,6 +1436,8 @@ void Texture::readData(void *buffer, TextureDataFormat dataFormat) {
     size_t rowBytes = static_cast<size_t>(width) * bytesPerPixel;
     NS::UInteger bytesPerRow = static_cast<NS::UInteger>(rowBytes);
     state.texture->getBytes(buffer, bytesPerRow, region, 0);
+#elif VULKAN
+    readVulkanTexture(this, buffer, dataFormat);
 #endif
 }
 
@@ -664,6 +1460,72 @@ void Texture::generateMipmaps([[maybe_unused]] uint levels) {
     blit->generateMipmaps(state.texture);
     blit->endEncoding();
     commandBuffer->commit();
+#elif VULKAN
+    auto &deviceState = vulkan::deviceState(Device::globalInstance);
+    auto &state = vulkan::textureState(this);
+    if (state.image == VK_NULL_HANDLE || state.mipLevels <= 1 ||
+        state.sampleCount != VK_SAMPLE_COUNT_1_BIT ||
+        isDepthTextureFormat(format)) {
+        return;
+    }
+
+    uint32_t mipCount = levels == 0
+                            ? state.mipLevels
+                            : std::min<uint32_t>(levels, state.mipLevels);
+    if (mipCount <= 1) {
+        return;
+    }
+
+    VkFormatProperties properties{};
+    vkGetPhysicalDeviceFormatProperties(deviceState.physicalDeviceInfo.device,
+                                        state.format, &properties);
+    if ((properties.optimalTilingFeatures &
+         VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) == 0) {
+        throw std::runtime_error(
+            "Vulkan texture format does not support linear mipmap generation");
+    }
+
+    VkCommandBuffer commandBuffer =
+        vulkan::beginSingleTimeCommands(deviceState);
+    int32_t mipWidth = static_cast<int32_t>(state.width);
+    int32_t mipHeight = static_cast<int32_t>(state.height);
+    int32_t mipDepth = static_cast<int32_t>(state.depth);
+    for (uint32_t mipLevel = 1; mipLevel < mipCount; ++mipLevel) {
+        transitionVulkanImage(commandBuffer, state, state.layout,
+                              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                              mipLevel - 1, 1, 0, state.arrayLayers);
+        transitionVulkanImage(commandBuffer, state, state.layout,
+                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, mipLevel, 1,
+                              0, state.arrayLayers);
+
+        VkImageBlit blit{};
+        blit.srcSubresource.aspectMask = state.aspectMask;
+        blit.srcSubresource.mipLevel = mipLevel - 1;
+        blit.srcSubresource.layerCount = state.arrayLayers;
+        blit.srcOffsets[1] = {mipWidth, mipHeight, mipDepth};
+        blit.dstSubresource.aspectMask = state.aspectMask;
+        blit.dstSubresource.mipLevel = mipLevel;
+        blit.dstSubresource.layerCount = state.arrayLayers;
+        blit.dstOffsets[1] = {std::max(mipWidth / 2, 1),
+                              std::max(mipHeight / 2, 1),
+                              std::max(mipDepth / 2, 1)};
+        vkCmdBlitImage(commandBuffer, state.image,
+                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, state.image,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                       VK_FILTER_LINEAR);
+
+        transitionVulkanImage(commandBuffer, state,
+                              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                              state.layout, mipLevel - 1, 1, 0,
+                              state.arrayLayers);
+        transitionVulkanImage(commandBuffer, state,
+                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, state.layout,
+                              mipLevel, 1, 0, state.arrayLayers);
+        mipWidth = std::max(mipWidth / 2, 1);
+        mipHeight = std::max(mipHeight / 2, 1);
+        mipDepth = std::max(mipDepth / 2, 1);
+    }
+    vulkan::endSingleTimeCommands(deviceState, commandBuffer);
 #endif
 }
 
@@ -672,6 +1534,8 @@ void Texture::automaticallyGenerateMipmaps() {
     glBindTexture(this->glType, textureID);
     glGenerateMipmap(this->glType);
 #elif defined(METAL)
+    generateMipmaps(0);
+#elif VULKAN
     generateMipmaps(0);
 #endif
 }
@@ -696,6 +1560,16 @@ void Texture::setWrapMode(TextureAxis axis, TextureWrapMode mode) {
         auto &deviceState = metal::deviceState(Device::globalInstance);
         metal::rebuildTextureSampler(this, deviceState.device);
     }
+#elif VULKAN
+    auto &state = vulkan::textureState(this);
+    if (axis == TextureAxis::S) {
+        state.wrapS = mode;
+    } else if (axis == TextureAxis::T) {
+        state.wrapT = mode;
+    } else {
+        state.wrapR = mode;
+    }
+    rebuildVulkanSampler(this);
 #endif
 }
 
@@ -712,6 +1586,9 @@ void Texture::changeBorderColor(const glm::vec4 &borderColor) {
         auto &deviceState = metal::deviceState(Device::globalInstance);
         metal::rebuildTextureSampler(this, deviceState.device);
     }
+#elif VULKAN
+    vulkan::textureState(this).borderColor = borderColor;
+    rebuildVulkanSampler(this);
 #endif
 }
 
@@ -729,6 +1606,11 @@ void Texture::setFilterMode(TextureFilterMode minFilter,
         auto &deviceState = metal::deviceState(Device::globalInstance);
         metal::rebuildTextureSampler(this, deviceState.device);
     }
+#elif VULKAN
+    auto &state = vulkan::textureState(this);
+    state.minFilter = minFilter;
+    state.magFilter = magFilter;
+    rebuildVulkanSampler(this);
 #endif
 }
 
@@ -751,6 +1633,13 @@ void Texture::setParameters(TextureWrapMode wrapS, TextureWrapMode wrapT,
         auto &deviceState = metal::deviceState(Device::globalInstance);
         metal::rebuildTextureSampler(this, deviceState.device);
     }
+#elif VULKAN
+    auto &state = vulkan::textureState(this);
+    state.wrapS = wrapS;
+    state.wrapT = wrapT;
+    state.minFilter = minFilter;
+    state.magFilter = magFilter;
+    rebuildVulkanSampler(this);
 #endif
 }
 
@@ -776,6 +1665,14 @@ void Texture::setParameters3D(TextureWrapMode wrapS, TextureWrapMode wrapT,
         auto &deviceState = metal::deviceState(Device::globalInstance);
         metal::rebuildTextureSampler(this, deviceState.device);
     }
+#elif VULKAN
+    auto &state = vulkan::textureState(this);
+    state.wrapS = wrapS;
+    state.wrapT = wrapT;
+    state.wrapR = wrapR;
+    state.minFilter = minFilter;
+    state.magFilter = magFilter;
+    rebuildVulkanSampler(this);
 #endif
 }
 
@@ -802,6 +1699,45 @@ void Pipeline::bindTexture(const std::string &name,
         return;
     }
     state.texturesByUnit[resolvedUnit] = texture;
+#elif VULKAN
+    if (shaderProgram == nullptr) {
+        throw std::runtime_error(
+            "bindTexture requires a Vulkan shader program");
+    }
+    auto &programState = vulkan::programState(shaderProgram.get());
+    auto bindingIt = programState.bindingsByName.find(name);
+    if (bindingIt == programState.bindingsByName.end()) {
+        throw std::runtime_error("Vulkan texture binding not found: " + name);
+    }
+    const auto &binding = bindingIt->second;
+    if (binding.type != vulkan::ShaderResourceType::CombinedImageSampler &&
+        binding.type != vulkan::ShaderResourceType::SampledImage &&
+        binding.type != vulkan::ShaderResourceType::Sampler &&
+        binding.type != vulkan::ShaderResourceType::StorageImage) {
+        throw std::runtime_error(
+            "bindTexture requires an image or sampler binding");
+    }
+    uint32_t arrayElement = 0;
+    if (binding.count > 1) {
+        if (unit < 0 || static_cast<uint32_t>(unit) >= binding.count) {
+            throw std::runtime_error(
+                "Vulkan texture descriptor array index is out of range");
+        }
+        arrayElement = static_cast<uint32_t>(unit);
+    }
+    auto &pipelineState = vulkan::pipelineState(this);
+    uint64_t key = vulkan::bindingKey(binding.set, binding.binding);
+    auto &images = pipelineState.boundImages[key].textures;
+    images.resize(binding.count);
+    images[arrayElement] = texture;
+    if (texture == nullptr &&
+        std::none_of(images.begin(), images.end(),
+                     [](const std::shared_ptr<Texture> &item) {
+                         return item != nullptr;
+                     })) {
+        pipelineState.boundImages.erase(key);
+    }
+    pipelineState.descriptorsDirty = true;
 #endif
 
     if (texture == nullptr) {
@@ -851,8 +1787,8 @@ void Pipeline::bindTextureArray(
     state.textureArgumentBuffer = deviceState.device->newBuffer(
         state.textureArgumentEncoder->encodedLength(),
         MTL::ResourceStorageModeShared);
-    state.textureArgumentEncoder->setArgumentBuffer(
-        state.textureArgumentBuffer, 0);
+    state.textureArgumentEncoder->setArgumentBuffer(state.textureArgumentBuffer,
+                                                    0);
     for (size_t i = 0; i < textures.size(); ++i) {
         if (textures[i] == nullptr) {
             continue;
@@ -876,6 +1812,9 @@ void Pipeline::bindTexture2D(const std::string &name, uint textureId, int unit,
 #elif defined(METAL)
     auto texture = metal::getTextureFromHandle(textureId);
     bindTexture(name, texture, unit, callerId);
+#elif VULKAN
+    auto texture = vulkan::getTextureFromHandle(textureId);
+    bindTexture(name, texture, unit, callerId);
 #endif
 }
 
@@ -891,6 +1830,9 @@ void Pipeline::bindTexture3D(const std::string &name, uint textureId, int unit,
 #elif defined(METAL)
     auto texture = metal::getTextureFromHandle(textureId);
     bindTexture(name, texture, unit, callerId);
+#elif VULKAN
+    auto texture = vulkan::getTextureFromHandle(textureId);
+    bindTexture(name, texture, unit, callerId);
 #endif
 }
 
@@ -904,6 +1846,9 @@ void Pipeline::bindTextureCubemap(const std::string &name, uint textureId,
     (void)callerId;
 #elif defined(METAL)
     auto texture = metal::getTextureFromHandle(textureId);
+    bindTexture(name, texture, unit, callerId);
+#elif VULKAN
+    auto texture = vulkan::getTextureFromHandle(textureId);
     bindTexture(name, texture, unit, callerId);
 #endif
 }
@@ -926,6 +1871,10 @@ std::shared_ptr<Texture> Texture::createMultisampled(TextureFormat format,
 
     return texture;
 #elif defined(METAL)
+    return Texture::create(TextureType::Texture2DMultisample, format, width,
+                           height, TextureDataFormat::Rgba, nullptr,
+                           static_cast<uint>(samples));
+#elif VULKAN
     return Texture::create(TextureType::Texture2DMultisample, format, width,
                            height, TextureDataFormat::Rgba, nullptr,
                            static_cast<uint>(samples));
@@ -967,6 +1916,17 @@ std::shared_ptr<Texture> Texture::createDepthCubemap(TextureFormat format,
     return Texture::create(TextureType::TextureCubeMap, format, resolution,
                            resolution, TextureDataFormat::DepthComponent,
                            nullptr, 1);
+#elif VULKAN
+    auto texture = Texture::create(TextureType::TextureCubeMap, format,
+                                   resolution, resolution,
+                                   TextureDataFormat::DepthComponent, nullptr,
+                                   1);
+    texture->setParameters3D(TextureWrapMode::ClampToEdge,
+                             TextureWrapMode::ClampToEdge,
+                             TextureWrapMode::ClampToEdge,
+                             TextureFilterMode::Nearest,
+                             TextureFilterMode::Nearest);
+    return texture;
 #else
     return nullptr;
 #endif
@@ -1066,10 +2026,42 @@ std::shared_ptr<Texture> Texture::create3D(TextureFormat format, int width,
     }
 
     return texture;
+#elif VULKAN
+    if (Device::globalInstance == nullptr) {
+        throw std::runtime_error(
+            "Cannot create Vulkan 3D texture without device");
+    }
+    auto &deviceState = vulkan::deviceState(Device::globalInstance);
+    if (deviceState.device == VK_NULL_HANDLE) {
+        throw std::runtime_error("Vulkan device is not initialized");
+    }
+    if (width <= 0 || height <= 0 || depth <= 0) {
+        throw std::runtime_error(
+            "Vulkan 3D texture dimensions must be positive");
+    }
+
+    auto texture = std::make_shared<Texture>();
+    texture->type = TextureType::Texture3D;
+    texture->format = format;
+    texture->width = width;
+    texture->height = height;
+    texture->mipLevels = 1;
+    texture->samples = 1;
+
+    auto &state = vulkan::textureState(texture.get());
+    state.type = TextureType::Texture3D;
+    state.opalFormat = format;
+    state.dataFormat = dataFormat;
+    createVulkanImage(texture.get(), depth);
+    texture->textureID = vulkan::registerTextureHandle(texture);
+    if (data != nullptr) {
+        uploadVulkanTexture(texture.get(), data, width, height, depth, 0,
+                            dataFormat);
+    }
+    return texture;
 #else
     return nullptr;
 #endif
 }
-
 
 } // namespace opal

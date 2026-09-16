@@ -13,12 +13,13 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <glad/glad.h>
 #include <memory>
 #include <opal/opal.h>
-#include <glad/glad.h>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 #ifdef METAL
 #include "metal_state.h"
 #ifdef __APPLE__
@@ -27,11 +28,17 @@
 #endif
 #endif
 
+#ifdef VULKAN
+#include "vulkan_state.h"
+#endif
+
 namespace opal {
 
 CommandBuffer::~CommandBuffer() {
 #ifdef METAL
     metal::releaseCommandBufferState(this);
+#elif VULKAN
+    vulkan::releaseCommandBufferState(this);
 #endif
 }
 
@@ -890,8 +897,7 @@ void bindComputeTextures(const std::shared_ptr<Pipeline> &pipeline,
                 continue;
             }
             auto &textureState = metal::textureState(texture.get());
-            encoder->useResource(textureState.texture,
-                                 MTL::ResourceUsageRead);
+            encoder->useResource(textureState.texture, MTL::ResourceUsageRead);
         }
     }
     std::array<MTL::Texture *, 64> desiredTextures{};
@@ -1158,6 +1164,23 @@ std::shared_ptr<CommandBuffer> Device::acquireCommandBuffer() {
     auto commandBuffer = std::make_shared<CommandBuffer>();
     commandBuffer->device = this;
 
+#ifdef VULKAN
+    auto &commandBufferState = vulkan::commandBufferState(commandBuffer.get());
+    auto &deviceState = vulkan::deviceState(this);
+
+    VkCommandBufferAllocateInfo allocateInfo{};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocateInfo.commandPool = deviceState.graphicsPool;
+    allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocateInfo.commandBufferCount = 1;
+
+    VULKAN_GUARD(vkAllocateCommandBuffers(deviceState.device, &allocateInfo,
+                                          &commandBufferState.commandBuffer),
+                 "Failed to allocate command buffer");
+    commandBufferState.device = deviceState.device;
+    commandBufferState.commandPool = deviceState.graphicsPool;
+#endif
+
     return commandBuffer;
 }
 
@@ -1181,7 +1204,8 @@ void CommandBuffer::start() {
                     ? error->localizedDescription()->utf8String()
                     : "Unknown Metal command buffer error";
             detail::log(LogLevel::Error,
-                        std::string("Metal GPU command failed: ") + description);
+                        std::string("Metal GPU command failed: ") +
+                            description);
         }
         buffer->release();
         state.inFlightCommandBuffers.erase(
@@ -1198,7 +1222,8 @@ void CommandBuffer::start() {
                     ? error->localizedDescription()->utf8String()
                     : "Unknown Metal command buffer error";
             detail::log(LogLevel::Error,
-                        std::string("Metal GPU command failed: ") + description);
+                        std::string("Metal GPU command failed: ") +
+                            description);
         }
         oldest->release();
         state.inFlightCommandBuffers.erase(
@@ -1226,6 +1251,64 @@ void CommandBuffer::start() {
     state.hasDraw = false;
     state.clearColorPending = false;
     state.clearDepthPending = false;
+#elif VULKAN
+    auto device = this->device;
+    auto &state = vulkan::commandBufferState(this);
+    auto &deviceState = vulkan::deviceState(device);
+
+    if (state.imageAvailableSemaphore == VK_NULL_HANDLE ||
+        state.renderFinishedSemaphore == VK_NULL_HANDLE) {
+        VkSemaphoreCreateInfo semaphoreInfo{};
+        semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        VULKAN_GUARD(vkCreateSemaphore(deviceState.device, &semaphoreInfo,
+                                       nullptr, &state.imageAvailableSemaphore),
+                     "Failed to create Vulkan image available semaphore");
+        VULKAN_GUARD(vkCreateSemaphore(deviceState.device, &semaphoreInfo,
+                                       nullptr, &state.renderFinishedSemaphore),
+                     "Failed to create Vulkan render finished semaphore");
+    }
+
+    if (state.inFlightFence == VK_NULL_HANDLE) {
+        VkFenceCreateInfo fenceInfo{};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+        VULKAN_GUARD(vkCreateFence(deviceState.device, &fenceInfo, nullptr,
+                                   &state.inFlightFence),
+                     "Failed to create Vulkan in-flight fence");
+    }
+
+    if (state.inFlightFence != VK_NULL_HANDLE && state.submitted) {
+        VULKAN_GUARD(vkWaitForFences(deviceState.device, 1,
+                                     &state.inFlightFence, VK_TRUE, UINT64_MAX),
+                     "Failed waiting for Vulkan command buffer fence");
+        state.submitted = false;
+    }
+
+    if (state.commandBuffer == VK_NULL_HANDLE) {
+        throw std::runtime_error(
+            "Vulkan command buffer is not initialized before start");
+    }
+
+    VULKAN_GUARD(vkResetFences(deviceState.device, 1, &state.inFlightFence),
+                 "Failed to reset Vulkan in-flight fence");
+
+    VULKAN_GUARD(vkResetCommandBuffer(state.commandBuffer, 0),
+                 "Failed to reset Vulkan command buffer");
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    VULKAN_GUARD(vkBeginCommandBuffer(state.commandBuffer, &beginInfo),
+                 "Failed to begin Vulkan command buffer");
+
+    state.recording = true;
+    state.rendering = false;
+    state.needsPresent = false;
+    state.imageAcquired = false;
+    state.imageIndex = UINT32_MAX;
+    state.activePipeline = nullptr;
+    state.boundPipeline = VK_NULL_HANDLE;
+    state.boundPipelineLayout = VK_NULL_HANDLE;
+
 #endif
 }
 
@@ -1370,6 +1453,433 @@ void CommandBuffer::beginPass(std::shared_ptr<RenderPass> newRenderPass) {
 
     state.clearColorPending = false;
     state.clearDepthPending = false;
+#elif VULKAN
+    auto &state = vulkan::commandBufferState(this);
+    auto &deviceState = vulkan::deviceState(device);
+    auto &contextState = vulkan::contextState(device->context.get());
+
+    if (!state.recording) {
+        throw std::runtime_error(
+            "Vulkan command buffer is not recording before beginPass");
+    }
+
+    if (state.rendering) {
+        endPass();
+    }
+
+    auto transitionImage =
+        [&](vulkan::TextureState &textureState, VkImageLayout newLayout,
+            VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess) {
+            if (textureState.layout == newLayout) {
+                return;
+            }
+
+            VkImageMemoryBarrier2 barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+
+            if (textureState.layout == VK_IMAGE_LAYOUT_UNDEFINED) {
+                barrier.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+                barrier.srcAccessMask = 0;
+            } else {
+                barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+
+                barrier.srcAccessMask =
+                    VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+            }
+
+            barrier.dstStageMask = dstStage;
+            barrier.dstAccessMask = dstAccess;
+
+            barrier.oldLayout = textureState.layout;
+
+            barrier.newLayout = newLayout;
+
+            barrier.image = textureState.image;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+
+            barrier.subresourceRange.aspectMask = textureState.aspectMask;
+
+            barrier.subresourceRange.baseMipLevel = 0;
+
+            barrier.subresourceRange.levelCount = textureState.mipLevels;
+
+            barrier.subresourceRange.baseArrayLayer = 0;
+
+            barrier.subresourceRange.layerCount = textureState.arrayLayers;
+
+            VkDependencyInfo dependency{};
+            dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+
+            dependency.imageMemoryBarrierCount = 1;
+            dependency.pImageMemoryBarriers = &barrier;
+
+            vkCmdPipelineBarrier2(state.commandBuffer, &dependency);
+
+            textureState.layout = newLayout;
+        };
+
+    if (framebuffer->isDefaultFramebuffer) {
+        if (!state.imageAcquired) {
+            VkResult result = vkAcquireNextImageKHR(
+                deviceState.device, contextState.swapchain, UINT64_MAX,
+                state.imageAvailableSemaphore, VK_NULL_HANDLE,
+                &state.imageIndex);
+            if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+                if (!vulkan::recreateSwapchain(device->context.get(),
+                                               deviceState)) {
+                    throw std::runtime_error("Vulkan swapchain is unavailable");
+                }
+                result = vkAcquireNextImageKHR(
+                    deviceState.device, contextState.swapchain, UINT64_MAX,
+                    state.imageAvailableSemaphore, VK_NULL_HANDLE,
+                    &state.imageIndex);
+            }
+            if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+                throw std::runtime_error("Failed to acquire next Vulkan image");
+            }
+            state.imageAcquired = true;
+            contextState.currentSwapchainImageIndex = state.imageIndex;
+        }
+        if (state.imageIndex == UINT32_MAX) {
+            throw std::runtime_error("No Vulkan swapchain image acquired "
+                                     "before default framebuffer pass");
+        }
+
+        framebuffer->width =
+            static_cast<int>(contextState.swapchainExtent.width);
+
+        framebuffer->height =
+            static_cast<int>(contextState.swapchainExtent.height);
+
+        VkImage image = contextState.swapchainImages[state.imageIndex];
+
+        VkImageView imageView =
+            contextState.swapchainImageViews[state.imageIndex];
+
+        VkImageLayout oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        if (state.imageIndex < contextState.swapchainImageLayouts.size()) {
+
+            oldLayout = contextState.swapchainImageLayouts[state.imageIndex];
+        }
+
+        if (oldLayout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+
+            VkImageMemoryBarrier2 barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+
+            if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
+                barrier.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+                barrier.srcAccessMask = 0;
+            } else {
+                barrier.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+                barrier.srcAccessMask = 0;
+            }
+
+            barrier.dstStageMask =
+                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+            barrier.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+                                    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+
+            barrier.oldLayout = oldLayout;
+
+            barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+            barrier.image = image;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+
+            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+
+            barrier.subresourceRange.baseMipLevel = 0;
+            barrier.subresourceRange.levelCount = 1;
+
+            barrier.subresourceRange.baseArrayLayer = 0;
+            barrier.subresourceRange.layerCount = 1;
+
+            VkDependencyInfo dependency{};
+            dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+
+            dependency.imageMemoryBarrierCount = 1;
+            dependency.pImageMemoryBarriers = &barrier;
+
+            vkCmdPipelineBarrier2(state.commandBuffer, &dependency);
+
+            if (state.imageIndex < contextState.swapchainImageLayouts.size()) {
+
+                contextState.swapchainImageLayouts[state.imageIndex] =
+                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            }
+        }
+
+        VkRenderingAttachmentInfo colorAttachment{};
+        colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+
+        colorAttachment.imageView = imageView;
+
+        colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        colorAttachment.loadOp = state.clearColorPending
+                                     ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                                     : VK_ATTACHMENT_LOAD_OP_LOAD;
+
+        colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+        colorAttachment.clearValue.color = {
+            {clearColorValue[0], clearColorValue[1], clearColorValue[2],
+             clearColorValue[3]}};
+
+        VkRenderingAttachmentInfo depthAttachment{};
+        VkRenderingAttachmentInfo *depthAttachmentPointer = nullptr;
+        if (deviceState.defaultDepthTexture != nullptr) {
+            auto &depthState =
+                vulkan::textureState(deviceState.defaultDepthTexture.get());
+            vulkan::transitionTexture(state.commandBuffer, depthState,
+                                      VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+            depthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            depthAttachment.imageView = depthState.imageView;
+            depthAttachment.imageLayout =
+                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+            depthAttachment.loadOp = state.clearDepthPending
+                                         ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                                         : VK_ATTACHMENT_LOAD_OP_LOAD;
+            depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            depthAttachment.clearValue.depthStencil = {clearDepthValue, 0};
+            depthAttachmentPointer = &depthAttachment;
+        }
+
+        VkRenderingInfo renderingInfo{};
+        renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+
+        renderingInfo.renderArea.offset = {0, 0};
+
+        renderingInfo.renderArea.extent = contextState.swapchainExtent;
+
+        renderingInfo.layerCount = 1;
+
+        renderingInfo.colorAttachmentCount = 1;
+        renderingInfo.pColorAttachments = &colorAttachment;
+
+        renderingInfo.pDepthAttachment = depthAttachmentPointer;
+
+        renderingInfo.pStencilAttachment = nullptr;
+
+        vkCmdBeginRendering(state.commandBuffer, &renderingInfo);
+
+        state.needsPresent = true;
+    } else {
+        std::vector<VkRenderingAttachmentInfo> colorAttachments;
+
+        VkRenderingAttachmentInfo depthAttachment{};
+        VkRenderingAttachmentInfo stencilAttachment{};
+
+        bool hasDepth = false;
+        bool hasStencil = false;
+
+        const int drawLimit = framebuffer->getDrawBufferCount();
+
+        int colorIndex = 0;
+
+        for (const auto &attachment : framebuffer->attachments) {
+
+            if (attachment.texture == nullptr) {
+                continue;
+            }
+
+            auto &textureState = vulkan::textureState(attachment.texture.get());
+
+            switch (attachment.type) {
+            case Attachment::Type::Color: {
+                if (framebuffer->colorBufferDisabled) {
+                    ++colorIndex;
+                    continue;
+                }
+
+                if (drawLimit >= 0 && colorIndex >= drawLimit) {
+                    ++colorIndex;
+                    continue;
+                }
+
+                transitionImage(textureState,
+                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+                                    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+
+                VkRenderingAttachmentInfo info{};
+                info.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+
+                info.imageView = textureState.imageView;
+
+                info.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+                info.loadOp = state.clearColorPending
+                                  ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                                  : VK_ATTACHMENT_LOAD_OP_LOAD;
+
+                info.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+                info.clearValue.color = {
+                    {clearColorValue[0], clearColorValue[1], clearColorValue[2],
+                     clearColorValue[3]}};
+
+                colorAttachments.push_back(info);
+
+                ++colorIndex;
+                break;
+            }
+
+            case Attachment::Type::Depth: {
+                transitionImage(
+                    textureState, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                    VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                        VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                    VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+
+                depthAttachment = {};
+                depthAttachment.sType =
+                    VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+
+                depthAttachment.imageView = textureState.imageView;
+
+                depthAttachment.imageLayout =
+                    VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+
+                depthAttachment.loadOp = state.clearDepthPending
+                                             ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                                             : VK_ATTACHMENT_LOAD_OP_LOAD;
+
+                depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+                depthAttachment.clearValue.depthStencil = {clearDepthValue, 0};
+
+                hasDepth = true;
+                break;
+            }
+
+            case Attachment::Type::Stencil: {
+                transitionImage(
+                    textureState, VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL,
+                    VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                        VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                    VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+
+                stencilAttachment = {};
+                stencilAttachment.sType =
+                    VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+
+                stencilAttachment.imageView = textureState.imageView;
+
+                stencilAttachment.imageLayout =
+                    VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL;
+
+                stencilAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+
+                stencilAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+                stencilAttachment.clearValue.depthStencil = {1.0f, 0};
+
+                hasStencil = true;
+                break;
+            }
+
+            case Attachment::Type::DepthStencil: {
+                transitionImage(
+                    textureState,
+                    VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                    VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                        VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                    VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+
+                depthAttachment = {};
+                depthAttachment.sType =
+                    VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+
+                depthAttachment.imageView = textureState.imageView;
+
+                depthAttachment.imageLayout =
+                    VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+                depthAttachment.loadOp = state.clearDepthPending
+                                             ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                                             : VK_ATTACHMENT_LOAD_OP_LOAD;
+
+                depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+                depthAttachment.clearValue.depthStencil = {clearDepthValue, 0};
+
+                stencilAttachment = depthAttachment;
+
+                hasDepth = true;
+                hasStencil = true;
+
+                break;
+            }
+
+            default:
+                break;
+            }
+        }
+
+        VkRenderingInfo renderingInfo{};
+        renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+
+        renderingInfo.renderArea.offset = {0, 0};
+
+        renderingInfo.renderArea.extent = {
+            static_cast<uint32_t>(std::max(framebuffer->width, 1)),
+
+            static_cast<uint32_t>(std::max(framebuffer->height, 1))};
+
+        renderingInfo.layerCount = 1;
+
+        renderingInfo.colorAttachmentCount =
+            static_cast<uint32_t>(colorAttachments.size());
+
+        renderingInfo.pColorAttachments =
+            colorAttachments.empty() ? nullptr : colorAttachments.data();
+
+        renderingInfo.pDepthAttachment = hasDepth ? &depthAttachment : nullptr;
+
+        renderingInfo.pStencilAttachment =
+            hasStencil ? &stencilAttachment : nullptr;
+
+        vkCmdBeginRendering(state.commandBuffer, &renderingInfo);
+    }
+
+    state.clearColorPending = false;
+    state.clearDepthPending = false;
+
+    VkViewport viewport{};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = static_cast<float>(framebuffer->width);
+    viewport.height = static_cast<float>(framebuffer->height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+
+    vkCmdSetViewport(state.commandBuffer, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.offset = {0, 0};
+
+    if (framebuffer->isDefaultFramebuffer) {
+        scissor.extent = contextState.swapchainExtent;
+    } else {
+        scissor.extent = {
+            static_cast<uint32_t>(std::max(framebuffer->width, 1)),
+            static_cast<uint32_t>(std::max(framebuffer->height, 1))};
+    }
+
+    vkCmdSetScissor(state.commandBuffer, 0, 1, &scissor);
+
+    state.rendering = true;
+
 #endif
 }
 
@@ -1402,6 +1912,75 @@ void CommandBuffer::endPass() {
     }
     state.textureBindingsInitialized = false;
     state.hasDraw = false;
+#elif VULKAN
+    auto &state = vulkan::commandBufferState(this);
+    auto &contextState = vulkan::contextState(device->context.get());
+
+    if (!state.recording) {
+        throw std::runtime_error(
+            "Vulkan command buffer is not recording before endPass");
+    }
+
+    if (!state.rendering) {
+        throw std::runtime_error(
+            "Vulkan command buffer is not rendering before endPass");
+    }
+
+    vkCmdEndRendering(state.commandBuffer);
+
+    if (framebuffer == nullptr || !framebuffer->isDefaultFramebuffer ||
+        !state.needsPresent) {
+        state.rendering = false;
+        renderPass = nullptr;
+        framebuffer = nullptr;
+        return;
+    }
+
+    VkImage image = contextState.swapchainImages[state.imageIndex];
+
+    VkImageMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+    barrier.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_NONE;
+
+    barrier.dstAccessMask = 0;
+
+    barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+    barrier.image = image;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+
+    barrier.subresourceRange.baseMipLevel = 0;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount = 1;
+
+    VkDependencyInfo dependencyInfo{};
+    dependencyInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+
+    dependencyInfo.imageMemoryBarrierCount = 1;
+    dependencyInfo.pImageMemoryBarriers = &barrier;
+
+    vkCmdPipelineBarrier2(state.commandBuffer, &dependencyInfo);
+
+    if (state.imageIndex < contextState.swapchainImageLayouts.size()) {
+        contextState.swapchainImageLayouts[state.imageIndex] =
+            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    }
+
+    state.rendering = false;
+
+    renderPass = nullptr;
+    framebuffer = nullptr;
 #endif
 }
 
@@ -1461,6 +2040,87 @@ void CommandBuffer::commit() {
         state.autoreleasePool->release();
         state.autoreleasePool = nullptr;
     }
+#elif VULKAN
+    auto &state = vulkan::commandBufferState(this);
+    auto &deviceState = vulkan::deviceState(device);
+    auto &contextState = vulkan::contextState(device->context.get());
+
+    if (!state.recording) {
+        throw std::runtime_error(
+            "Vulkan command buffer is not recording before commit");
+    }
+
+    if (state.rendering) {
+        throw std::runtime_error(
+            "Vulkan command buffer is still rendering before commit");
+    }
+
+    VULKAN_GUARD(vkEndCommandBuffer(state.commandBuffer),
+                 "Failed to end Vulkan command buffer");
+
+    state.recording = false;
+
+    VkSemaphoreSubmitInfo waitSemaphoreInfo{};
+    waitSemaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    waitSemaphoreInfo.semaphore = state.imageAvailableSemaphore;
+    waitSemaphoreInfo.stageMask =
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+    VkCommandBufferSubmitInfo commandInfo{};
+    commandInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+
+    commandInfo.commandBuffer = state.commandBuffer;
+
+    VkSemaphoreSubmitInfo signalInfo{};
+    signalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+
+    signalInfo.semaphore = state.renderFinishedSemaphore;
+
+    signalInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+
+    VkSubmitInfo2 submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+
+    submitInfo.waitSemaphoreInfoCount = state.imageAcquired ? 1u : 0u;
+    submitInfo.pWaitSemaphoreInfos =
+        state.imageAcquired ? &waitSemaphoreInfo : nullptr;
+
+    submitInfo.commandBufferInfoCount = 1;
+    submitInfo.pCommandBufferInfos = &commandInfo;
+
+    submitInfo.signalSemaphoreInfoCount = state.needsPresent ? 1u : 0u;
+    submitInfo.pSignalSemaphoreInfos =
+        state.needsPresent ? &signalInfo : nullptr;
+
+    VULKAN_GUARD(vkQueueSubmit2(deviceState.graphicsQueue, 1, &submitInfo,
+                                state.inFlightFence),
+                 "Failed to submit Vulkan command buffer");
+
+    state.submitted = true;
+
+    if (state.needsPresent) {
+        VkPresentInfoKHR presentInfo{};
+        presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        presentInfo.waitSemaphoreCount = 1;
+        presentInfo.pWaitSemaphores = &state.renderFinishedSemaphore;
+        presentInfo.swapchainCount = 1;
+        presentInfo.pSwapchains = &contextState.swapchain;
+        presentInfo.pImageIndices = &state.imageIndex;
+
+        VkResult result =
+            vkQueuePresentKHR(deviceState.presentQueue, &presentInfo);
+        if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+            vulkan::recreateSwapchain(device->context.get(), deviceState);
+        } else if (result != VK_SUCCESS) {
+            throw std::runtime_error(
+                "Failed to present Vulkan swapchain image");
+        }
+    }
+    state.imageAcquired = false;
+    state.needsPresent = false;
+    state.imageIndex = UINT32_MAX;
+    contextState.currentSwapchainImageIndex = UINT32_MAX;
+    device->frameCount++;
 #endif
 }
 
@@ -1476,12 +2136,25 @@ void CommandBuffer::waitForSubmittedWork() {
                     ? error->localizedDescription()->utf8String()
                     : "Unknown Metal command buffer error";
             detail::log(LogLevel::Error,
-                        std::string("Metal GPU command failed: ") + description);
+                        std::string("Metal GPU command failed: ") +
+                            description);
         }
         submitted->release();
     }
     state.inFlightCommandBuffers.clear();
     state.inFlightResources.clear();
+#elif defined(VULKAN)
+    auto &state = vulkan::commandBufferState(this);
+    if (state.inFlightFence == VK_NULL_HANDLE) {
+        return;
+    }
+
+    auto &deviceState = vulkan::deviceState(device);
+
+    VULKAN_GUARD(vkWaitForFences(deviceState.device, 1, &state.inFlightFence,
+                                 VK_TRUE, UINT64_MAX),
+                 "Failed waiting for Vulkan submitted work");
+    state.submitted = false;
 #endif
 }
 
@@ -1491,6 +2164,12 @@ void CommandBuffer::bindPipeline(const std::shared_ptr<Pipeline> &pipeline) {
 #endif
     pipeline->bind();
     boundPipeline = pipeline;
+
+#ifdef VULKAN
+    auto &state = vulkan::commandBufferState(this);
+
+    state.activePipeline = pipeline.get();
+#endif
 }
 
 void CommandBuffer::unbindPipeline() { boundPipeline = nullptr; }
@@ -1558,6 +2237,41 @@ auto CommandBuffer::draw(uint vertexCount, uint instanceCount, uint firstVertex,
                                   static_cast<NS::UInteger>(instanceCount),
                                   static_cast<NS::UInteger>(firstInstance));
     state.hasDraw = true;
+#elif VULKAN
+    if (boundPipeline == nullptr || framebuffer == nullptr) {
+        throw std::runtime_error(
+            "Vulkan command buffer cannot draw without a bound pipeline and "
+            "framebuffer");
+    }
+
+    auto &state = vulkan::commandBufferState(this);
+
+    if (!state.recording) {
+        throw std::runtime_error(
+            "Vulkan command buffer is not recording before draw");
+    }
+
+    if (!state.rendering) {
+        throw std::runtime_error(
+            "Vulkan command buffer is not rendering before draw");
+    }
+
+    if (boundPipeline->shaderProgram == nullptr ||
+        boundPipeline->shaderProgram->isComputeProgram()) {
+        throw std::runtime_error(
+            "Vulkan command buffer cannot draw with a compute shader program");
+    }
+
+    const auto target = vulkan::getRenderTargetSignature(framebuffer, device);
+    const VkExtent2D targetExtent =
+        vulkan::getRenderExtent(framebuffer, device);
+
+    vulkan::bindPipeline(this, boundPipeline.get(), target, targetExtent);
+
+    vulkan::bindVulkanDrawingState(this, boundDrawingState, boundPipeline);
+
+    vkCmdDraw(state.commandBuffer, vertexCount, instanceCount, firstVertex,
+              firstInstance);
 #endif
 
     detail::emit(DrawEvent{std::to_string(objectId), DrawType::Draw,
@@ -1632,6 +2346,44 @@ void CommandBuffer::drawIndexed(uint indexCount, uint instanceCount,
         static_cast<NS::UInteger>(instanceCount), vertexOffset,
         static_cast<NS::UInteger>(firstInstance));
     state.hasDraw = true;
+#elif defined(VULKAN)
+    if (boundPipeline == nullptr) {
+        throw std::runtime_error("Vulkan indexed draw requires a pipeline");
+    }
+
+    if (framebuffer == nullptr) {
+        throw std::runtime_error("Vulkan indexed draw requires an active pass");
+    }
+
+    if (boundDrawingState == nullptr ||
+        boundDrawingState->indexBuffer == nullptr) {
+        throw std::runtime_error(
+            "Vulkan indexed draw requires an index buffer");
+    }
+
+    auto &state = vulkan::commandBufferState(this);
+    if (!state.recording || !state.rendering) {
+        throw std::runtime_error(
+            "Vulkan indexed draw requires active rendering");
+    }
+
+    const auto target = vulkan::getRenderTargetSignature(framebuffer, device);
+    const VkExtent2D extent = vulkan::getRenderExtent(framebuffer, device);
+
+    vulkan::bindPipeline(this, boundPipeline.get(), target, extent);
+
+    vulkan::bindVulkanDrawingState(this, boundDrawingState, boundPipeline);
+
+    auto &index = vulkan::bufferState(boundDrawingState->indexBuffer.get());
+    if (index.buffer == VK_NULL_HANDLE) {
+        throw std::runtime_error("Vulkan index buffer is not initialized");
+    }
+
+    vkCmdBindIndexBuffer(state.commandBuffer, index.buffer, 0,
+                         VK_INDEX_TYPE_UINT32);
+
+    vkCmdDrawIndexed(state.commandBuffer, indexCount, instanceCount, firstIndex,
+                     vertexOffset, firstInstance);
 #endif
 
     detail::emit(DrawEvent{std::to_string(objectId), DrawType::Indexed,
@@ -1691,6 +2443,30 @@ void CommandBuffer::drawPatches(uint vertexCount, uint firstVertex,
                                   static_cast<NS::UInteger>(firstVertex),
                                   static_cast<NS::UInteger>(vertexCount));
     state.hasDraw = true;
+#elif defined(VULKAN)
+    if (boundPipeline == nullptr || framebuffer == nullptr) {
+        throw std::runtime_error(
+            "Vulkan patch draw requires pipeline and framebuffer");
+    }
+
+    auto &state = vulkan::commandBufferState(this);
+    if (!state.rendering) {
+        throw std::runtime_error("Vulkan patch draw requires active rendering");
+    }
+
+    auto &pipelineState = vulkan::pipelineState(boundPipeline.get());
+    if (!pipelineState.hasTessellation) {
+        throw std::runtime_error(
+            "drawPatches requires a tessellation pipeline");
+    }
+
+    const auto target = vulkan::getRenderTargetSignature(framebuffer, device);
+    const auto extent = vulkan::getRenderExtent(framebuffer, device);
+
+    vulkan::bindPipeline(this, boundPipeline.get(), target, extent);
+    vulkan::bindVulkanDrawingState(this, boundDrawingState, boundPipeline);
+
+    vkCmdDraw(state.commandBuffer, vertexCount, 1, firstVertex, 0);
 #endif
 
     detail::emit(DrawEvent{std::to_string(objectId), DrawType::Patch,
@@ -1810,6 +2586,49 @@ void CommandBuffer::dispatch(uint threadCountX, uint threadCountY,
                   (countZ + tgZ - 1) / tgZ);
     state.computeEncoder->dispatchThreadgroups(threadgroups, threadsPerGroup);
     state.hasDraw = true;
+#elif defined(VULKAN)
+    if (boundPipeline == nullptr || boundPipeline->shaderProgram == nullptr) {
+        throw std::runtime_error("Vulkan dispatch requires a bound pipeline");
+    }
+
+    if (!boundPipeline->shaderProgram->isComputeProgram()) {
+        throw std::runtime_error("Vulkan dispatch requires a compute pipeline");
+    }
+
+    auto &state = vulkan::commandBufferState(this);
+
+    if (!state.recording) {
+        throw std::runtime_error(
+            "Vulkan dispatch requires command buffer recording");
+    }
+
+    if (state.rendering) {
+        endPass();
+    }
+
+    vulkan::RenderTargetSignature dummyTarget{};
+
+    vulkan::bindPipeline(this, boundPipeline.get(), dummyTarget, {1, 1});
+
+    const uint32_t groupSizeX =
+        std::max<uint32_t>(1, boundPipeline->getComputeThreadgroupSizeX());
+
+    const uint32_t groupSizeY =
+        std::max<uint32_t>(1, boundPipeline->getComputeThreadgroupSizeY());
+
+    const uint32_t groupSizeZ =
+        std::max<uint32_t>(1, boundPipeline->getComputeThreadgroupSizeZ());
+
+    const uint32_t groupsX =
+        (std::max(threadCountX, 1u) + groupSizeX - 1) / groupSizeX;
+
+    const uint32_t groupsY =
+        (std::max(threadCountY, 1u) + groupSizeY - 1) / groupSizeY;
+
+    const uint32_t groupsZ =
+        (std::max(threadCountZ, 1u) + groupSizeZ - 1) / groupSizeZ;
+
+    vkCmdDispatch(state.commandBuffer, groupsX, groupsY, groupsZ);
 #endif
 }
 
@@ -1820,6 +2639,33 @@ void CommandBuffer::computeBarrier() {
         state.computeEncoder->memoryBarrier(MTL::BarrierScope(
             MTL::BarrierScopeBuffers | MTL::BarrierScopeTextures));
     }
+#elif defined(VULKAN)
+
+    auto &state = vulkan::commandBufferState(this);
+
+    if (!state.recording) {
+        throw std::runtime_error(
+            "computeBarrier called outside Vulkan recording");
+    }
+
+    VkMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    barrier.srcAccessMask =
+        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                           VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+                           VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT |
+                            VK_ACCESS_2_SHADER_READ_BIT;
+
+    VkDependencyInfo dependency{};
+    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &barrier;
+
+    vkCmdPipelineBarrier2(state.commandBuffer, &dependency);
 #endif
 }
 
@@ -1847,6 +2693,120 @@ void CommandBuffer::generateMipmaps(const std::shared_ptr<Texture> &texture) {
     auto *blitEncoder = state.commandBuffer->blitCommandEncoder();
     blitEncoder->generateMipmaps(textureState.texture);
     blitEncoder->endEncoding();
+#elif defined(VULKAN)
+    auto &cmd = vulkan::commandBufferState(this);
+    auto &tex = vulkan::textureState(texture.get());
+
+    if (tex.mipLevels <= 1) {
+        return;
+    }
+
+    if (!cmd.recording) {
+        throw std::runtime_error("generateMipmaps requires command recording");
+    }
+
+    int32_t mipWidth = static_cast<int32_t>(tex.width);
+    int32_t mipHeight = static_cast<int32_t>(tex.height);
+    int32_t mipDepth = static_cast<int32_t>(tex.depth);
+
+    VkFormatProperties properties{};
+    auto &deviceState = vulkan::deviceState(device);
+    vkGetPhysicalDeviceFormatProperties(deviceState.physicalDeviceInfo.device,
+                                        tex.format, &properties);
+    if (tex.sampleCount != VK_SAMPLE_COUNT_1_BIT ||
+        (tex.aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) == 0 ||
+        (properties.optimalTilingFeatures &
+         VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) == 0) {
+        throw std::runtime_error(
+            "Vulkan texture does not support mipmap generation");
+    }
+
+    for (uint32_t i = 1; i < tex.mipLevels; ++i) {
+        VkImageMemoryBarrier2 toDestination{};
+        toDestination.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        toDestination.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        toDestination.srcAccessMask =
+            VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+        toDestination.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        toDestination.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        toDestination.oldLayout = tex.layout;
+        toDestination.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        toDestination.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toDestination.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toDestination.image = tex.image;
+        toDestination.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        toDestination.subresourceRange.baseMipLevel = i;
+        toDestination.subresourceRange.levelCount = 1;
+        toDestination.subresourceRange.baseArrayLayer = 0;
+        toDestination.subresourceRange.layerCount = tex.arrayLayers;
+
+        VkImageMemoryBarrier2 toSource{};
+        toSource.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        toSource.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        toSource.srcAccessMask =
+            VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+        toSource.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        toSource.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+        toSource.oldLayout = tex.layout;
+        toSource.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        toSource.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toSource.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toSource.image = tex.image;
+        toSource.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        toSource.subresourceRange.baseMipLevel = i - 1;
+        toSource.subresourceRange.levelCount = 1;
+        toSource.subresourceRange.baseArrayLayer = 0;
+        toSource.subresourceRange.layerCount = tex.arrayLayers;
+
+        VkDependencyInfo dep{};
+        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        VkImageMemoryBarrier2 preparation[] = {toSource, toDestination};
+        dep.imageMemoryBarrierCount = 2;
+        dep.pImageMemoryBarriers = preparation;
+
+        vkCmdPipelineBarrier2(cmd.commandBuffer, &dep);
+
+        VkImageBlit blit{};
+        blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.srcSubresource.mipLevel = i - 1;
+        blit.srcSubresource.baseArrayLayer = 0;
+        blit.srcSubresource.layerCount = tex.arrayLayers;
+        blit.srcOffsets[1] = {mipWidth, mipHeight, mipDepth};
+        blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.dstSubresource.mipLevel = i;
+        blit.dstSubresource.baseArrayLayer = 0;
+        blit.dstSubresource.layerCount = tex.arrayLayers;
+
+        const int32_t nextWidth = std::max(1, mipWidth / 2);
+
+        const int32_t nextHeight = std::max(1, mipHeight / 2);
+
+        const int32_t nextDepth = std::max(1, mipDepth / 2);
+        blit.dstOffsets[1] = {nextWidth, nextHeight, nextDepth};
+
+        vkCmdBlitImage(cmd.commandBuffer, tex.image,
+                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, tex.image,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                       VK_FILTER_LINEAR);
+
+        VkImageMemoryBarrier2 restored[] = {toSource, toDestination};
+        for (auto &barrier : restored) {
+            barrier.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            barrier.srcAccessMask =
+                VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+            barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            barrier.dstAccessMask =
+                VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+            barrier.oldLayout = barrier.newLayout;
+            barrier.newLayout = tex.layout;
+        }
+        dep.pImageMemoryBarriers = restored;
+        vkCmdPipelineBarrier2(cmd.commandBuffer, &dep);
+
+        mipWidth = nextWidth;
+        mipHeight = nextHeight;
+        mipDepth = nextDepth;
+    }
 #endif
 }
 
@@ -1864,7 +2824,6 @@ bool CommandBuffer::performSpatialUpscale(
     return false;
 #endif
 }
-
 
 void CommandBuffer::clearColor(float r, float g, float b, float a) {
 #ifdef OPENGL
@@ -1884,6 +2843,48 @@ void CommandBuffer::clearColor(float r, float g, float b, float a) {
         configureColorAttachmentForClear(state.passDescriptor, 8,
                                          clearColorValue, true);
     }
+#elif defined(VULKAN)
+    auto &state = vulkan::commandBufferState(this);
+
+    if (state.rendering) {
+        uint32_t colorCount = framebuffer->isDefaultFramebuffer ? 1u : 0u;
+        if (!framebuffer->isDefaultFramebuffer &&
+            !framebuffer->colorBufferDisabled) {
+            for (const auto &attachment : framebuffer->attachments) {
+                colorCount += attachment.type == Attachment::Type::Color &&
+                                      attachment.texture != nullptr
+                                  ? 1u
+                                  : 0u;
+            }
+            if (framebuffer->getDrawBufferCount() >= 0) {
+                colorCount = std::min(
+                    colorCount,
+                    static_cast<uint32_t>(framebuffer->getDrawBufferCount()));
+            }
+        }
+        std::vector<VkClearAttachment> clearAttachments(colorCount);
+        for (uint32_t index = 0; index < colorCount; ++index) {
+            clearAttachments[index].aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            clearAttachments[index].colorAttachment = index;
+            clearAttachments[index].clearValue.color = {{r, g, b, a}};
+        }
+
+        VkClearRect clearRect{};
+        clearRect.rect.offset = {0, 0};
+        clearRect.rect.extent = {static_cast<uint32_t>(framebuffer->width),
+                                 static_cast<uint32_t>(framebuffer->height)};
+        clearRect.baseArrayLayer = 0;
+        clearRect.layerCount = 1;
+
+        if (!clearAttachments.empty()) {
+            vkCmdClearAttachments(
+                state.commandBuffer,
+                static_cast<uint32_t>(clearAttachments.size()),
+                clearAttachments.data(), 1, &clearRect);
+        }
+    } else {
+        state.clearColorPending = true;
+    }
 #endif
 }
 
@@ -1901,6 +2902,43 @@ void CommandBuffer::clearDepth(float depth) {
     if (state.passDescriptor != nullptr && state.encoder == nullptr) {
         configureDepthAttachmentForClear(state.passDescriptor, clearDepthValue,
                                          true);
+    }
+#elif defined(VULKAN)
+    auto &state = vulkan::commandBufferState(this);
+
+    if (state.rendering) {
+        bool hasDepth = framebuffer->isDefaultFramebuffer;
+        if (!hasDepth) {
+            for (const auto &attachment : framebuffer->attachments) {
+                hasDepth =
+                    (attachment.type == Attachment::Type::Depth ||
+                     attachment.type == Attachment::Type::DepthStencil) &&
+                    attachment.texture != nullptr;
+                if (hasDepth) {
+                    break;
+                }
+            }
+        }
+        if (!hasDepth) {
+            return;
+        }
+        VkClearAttachment clearAttachment{};
+        clearAttachment.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        clearAttachment.colorAttachment = 0;
+        clearAttachment.clearValue.depthStencil.depth = depth;
+        clearAttachment.clearValue.depthStencil.stencil = 0;
+
+        VkClearRect clearRect{};
+        clearRect.rect.offset = {0, 0};
+        clearRect.rect.extent = {static_cast<uint32_t>(framebuffer->width),
+                                 static_cast<uint32_t>(framebuffer->height)};
+        clearRect.baseArrayLayer = 0;
+        clearRect.layerCount = 1;
+
+        vkCmdClearAttachments(state.commandBuffer, 1, &clearAttachment, 1,
+                              &clearRect);
+    } else {
+        state.clearDepthPending = true;
     }
 #endif
 }
@@ -1927,6 +2965,63 @@ void CommandBuffer::clear(float r, float g, float b, float a, float depth) {
                                          clearColorValue, true);
         configureDepthAttachmentForClear(state.passDescriptor, clearDepthValue,
                                          true);
+    }
+#elif defined(VULKAN)
+    auto &state = vulkan::commandBufferState(this);
+
+    if (state.rendering) {
+        uint32_t colorCount = framebuffer->isDefaultFramebuffer ? 1u : 0u;
+        bool hasDepth = framebuffer->isDefaultFramebuffer;
+        if (!framebuffer->isDefaultFramebuffer) {
+            for (const auto &attachment : framebuffer->attachments) {
+                if (attachment.type == Attachment::Type::Color &&
+                    attachment.texture != nullptr &&
+                    !framebuffer->colorBufferDisabled) {
+                    colorCount++;
+                }
+                if ((attachment.type == Attachment::Type::Depth ||
+                     attachment.type == Attachment::Type::DepthStencil) &&
+                    attachment.texture != nullptr) {
+                    hasDepth = true;
+                }
+            }
+            if (framebuffer->getDrawBufferCount() >= 0) {
+                colorCount = std::min(
+                    colorCount,
+                    static_cast<uint32_t>(framebuffer->getDrawBufferCount()));
+            }
+        }
+        std::vector<VkClearAttachment> clearAttachments;
+        clearAttachments.reserve(colorCount + (hasDepth ? 1u : 0u));
+        for (uint32_t index = 0; index < colorCount; ++index) {
+            VkClearAttachment color{};
+            color.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            color.colorAttachment = index;
+            color.clearValue.color = {{r, g, b, a}};
+            clearAttachments.push_back(color);
+        }
+        if (hasDepth) {
+            VkClearAttachment depthAttachment{};
+            depthAttachment.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+            depthAttachment.clearValue.depthStencil.depth = depth;
+            clearAttachments.push_back(depthAttachment);
+        }
+
+        VkClearRect clearRect{};
+        clearRect.rect.offset = {0, 0};
+        clearRect.rect.extent = {static_cast<uint32_t>(framebuffer->width),
+                                 static_cast<uint32_t>(framebuffer->height)};
+        clearRect.baseArrayLayer = 0;
+        clearRect.layerCount = 1;
+        if (!clearAttachments.empty()) {
+            vkCmdClearAttachments(
+                state.commandBuffer,
+                static_cast<uint32_t>(clearAttachments.size()),
+                clearAttachments.data(), 1, &clearRect);
+        }
+    } else {
+        state.clearColorPending = true;
+        state.clearDepthPending = true;
     }
 #endif
 }

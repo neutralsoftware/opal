@@ -132,14 +132,12 @@ class Context {
     bool highPixelDensity = true;
     bool hidden = false;
     int samples = 0;
-
 };
 
 class CommandBuffer;
 class Framebuffer;
 class Buffer;
 class Texture;
-
 
 struct DeviceInfo {
     /** @brief GPU/adapter name reported by the backend. */
@@ -205,7 +203,6 @@ class Device {
     long frameCount = 0;
     std::shared_ptr<Context> context = nullptr;
     static Device *globalInstance;
-
 };
 
 enum class TextureType {
@@ -334,7 +331,6 @@ class Texture {
     uint mipLevels = 1;
     int samples = 1; // For multisampled textures
 
-
   private:
     friend class Pipeline;
     friend class CommandBuffer;
@@ -342,7 +338,6 @@ class Texture {
 
     uint glType = 0;
     uint glFormat = 0;
-
 };
 
 enum class ShaderType {
@@ -353,7 +348,6 @@ enum class ShaderType {
     TessellationEvaluation,
     Compute
 };
-
 
 class Shader {
   public:
@@ -376,8 +370,7 @@ class Shader {
     char *source = nullptr;
     std::string functionName;
 
-
-#if defined(METAL)
+#if defined(METAL) || defined(VULKAN)
     static int currentId;
 #endif
 
@@ -403,8 +396,7 @@ class ShaderProgram {
     std::vector<std::shared_ptr<Shader>> attachedShaders;
     bool isComputeProgram() const { return computeProgram; }
 
-
-#if defined(METAL)
+#if defined(METAL) || defined(VULKAN)
     static int currentId;
 #endif
 
@@ -491,8 +483,8 @@ struct VertexAttribute {
 };
 
 struct VertexBinding {
-    uint stride;
-    VertexBindingInputRate inputRate;
+    uint stride = 0;
+    VertexBindingInputRate inputRate = VertexBindingInputRate::Vertex;
 };
 
 class PrimitiveAccelerationStructure;
@@ -614,8 +606,16 @@ class Pipeline {
                           uint32_t bufferIndex);
 #endif
 
-
     bool multisamplingEnabled = false;
+
+    int viewportX = 0;
+    int viewportY = 0;
+    int viewportWidth = 0;
+    int viewportHeight = 0;
+
+    bool polygonOffsetEnabled = false;
+    float polygonOffsetFactor = 0.0f;
+    float polygonOffsetUnits = 0.0f;
 
   private:
     PrimitiveStyle primitiveStyle = PrimitiveStyle::Triangles;
@@ -631,19 +631,13 @@ class Pipeline {
     bool depthTestEnabled = false;
     bool depthWriteEnabled = true;
     CompareOp depthCompareOp = CompareOp::Less;
-    bool polygonOffsetEnabled = false;
-    float polygonOffsetFactor = 0.0f;
-    float polygonOffsetUnits = 0.0f;
+
     float lineWidth = 1.0f;
     std::vector<int> enabledClipDistances;
 
     std::vector<VertexAttribute> vertexAttributes;
     VertexBinding vertexBinding;
 
-    int viewportX = 0;
-    int viewportY = 0;
-    int viewportWidth = 0;
-    int viewportHeight = 0;
     uint computeThreadgroupX = 8;
     uint computeThreadgroupY = 8;
     uint computeThreadgroupZ = 1;
@@ -700,7 +694,6 @@ class Buffer {
 
     BufferUsage usage;
     MemoryUsageType memoryUsage;
-
 };
 
 struct VertexAttributeBinding {
@@ -830,13 +823,13 @@ class Framebuffer {
     int height;
     std::vector<Attachment> attachments;
     bool isDefaultFramebuffer = false;
-
+    bool colorBufferDisabled = false;
 
   private:
-    bool colorBufferDisabled = false;
     int drawBufferCount = -1;
-};
 
+    friend class CommandBuffer;
+};
 
 class RenderPass {
   public:
@@ -845,7 +838,6 @@ class RenderPass {
     void setFramebuffer(std::shared_ptr<Framebuffer> framebuffer);
 
     std::shared_ptr<Framebuffer> framebuffer;
-
 };
 
 class ResolveAction {
@@ -880,7 +872,6 @@ class ResolveAction {
     bool resolveColor = true;
 };
 
-#ifdef METAL
 struct PrimitiveVertex {
     float position[3];
     float normal[3];
@@ -888,6 +879,16 @@ struct PrimitiveVertex {
     float bitangent[3];
     float uv[2];
 };
+
+struct AccelerationStructureInstance {
+    std::shared_ptr<PrimitiveAccelerationStructure> blas;
+    glm::mat4 transform;
+    uint32_t instanceId;
+    uint32_t mask;
+    bool cullDisable;
+};
+
+#ifdef METAL
 
 class PrimitiveAccelerationStructure {
   public:
@@ -917,14 +918,6 @@ class PrimitiveAccelerationStructure {
 
 static inline void writeMetalTransform3x4(const glm::mat4 &M, float out3x4[12]);
 
-struct AccelerationStructureInstance {
-    std::shared_ptr<PrimitiveAccelerationStructure> blas;
-    glm::mat4 transform;
-    uint32_t instanceId;
-    uint32_t mask;
-    bool cullDisable;
-};
-
 class InstanceAccelerationStructure {
   public:
     ~InstanceAccelerationStructure();
@@ -946,6 +939,10 @@ class InstanceAccelerationStructure {
 
     friend class CommandBuffer;
 };
+#elif VULKAN
+
+class PrimitiveAccelerationStructure {};
+class InstanceAccelerationStructure {};
 
 #endif
 
@@ -1013,7 +1010,6 @@ class CommandBuffer {
 #endif
 
   private:
-
     float clearColorValue[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     float clearDepthValue = 1.0f;
 
@@ -1028,7 +1024,6 @@ class CommandBuffer {
     std::shared_ptr<Framebuffer> framebuffer = nullptr;
     Device *device = nullptr;
 };
-
 
 } // namespace opal
 

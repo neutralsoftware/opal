@@ -7,13 +7,14 @@
  Copyright (c) 2025 maxvdec
 */
 
-#include "opal/opal.h"
-#include <glad/glad.h>
 #include "diagnostics.h"
+#include "opal/opal.h"
 #include "windowing.h"
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstring>
+#include <glad/glad.h>
 #include <memory>
 #include <stdexcept>
 #ifdef METAL
@@ -21,12 +22,18 @@
 #include <objc/message.h>
 #include <objc/runtime.h>
 #endif
+#ifdef VULKAN
+#include "vulkan_state.h"
+#include <SDL3/SDL_vulkan.h>
+#endif
 
 namespace opal {
 
 Context::~Context() {
 #ifdef METAL
     metal::releaseContextState(this);
+#elif VULKAN
+    vulkan::releaseContextState(this);
 #endif
     if (glContext != nullptr) {
         SDL_GL_DestroyContext(glContext);
@@ -41,7 +48,12 @@ Context::~Context() {
 Device::~Device() {
 #ifdef METAL
     metal::releaseDeviceState(this);
+#elif VULKAN
+    vulkan::releaseDeviceState(this);
 #endif
+    if (Device::globalInstance == this) {
+        Device::globalInstance = nullptr;
+    }
 }
 
 #ifdef METAL
@@ -182,8 +194,111 @@ std::shared_ptr<Context> Context::create(ContextConfiguration config) {
 #ifdef METAL
     config.useOpenGL = false;
     context->config.useOpenGL = false;
+#elif VULKAN
+    config.useOpenGL = false;
+    context->config.useOpenGL = false;
+
+    auto &vulkanState = vulkan::contextState(context.get());
+    VkApplicationInfo appInfo{};
+    appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    appInfo.pApplicationName = config.applicationName.c_str();
+    appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
+    appInfo.pEngineName = "Atlas Engine";
+    appInfo.engineVersion = VK_MAKE_VERSION(0, 1, 0);
+    uint32_t supportedVersion = VK_API_VERSION_1_0;
+    VULKAN_GUARD(vkEnumerateInstanceVersion(&supportedVersion),
+                 "Failed to query Vulkan instance version");
+    if (supportedVersion < VK_API_VERSION_1_3) {
+        throw std::runtime_error("Opal requires Vulkan 1.3");
+    }
+    appInfo.apiVersion = VK_API_VERSION_1_3;
+    vulkanState.apiVersion = VK_API_VERSION_1_3;
+
+    VkInstanceCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+#ifdef __APPLE__
+    detail::log(LogLevel::Warning,
+                "Consider using Metal instead of Vulkan on macOS for better "
+                "performance and compatibility");
+    createInfo.flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+#endif
+    createInfo.pApplicationInfo = &appInfo;
+
+    std::vector<const char *> extensions;
+
+    Uint32 sdlExtensionCount = 0;
+    const char *const *sdlExtensions =
+        SDL_Vulkan_GetInstanceExtensions(&sdlExtensionCount);
+
+    if (sdlExtensions == nullptr || sdlExtensionCount == 0) {
+        throw std::runtime_error(
+            "Failed to obtain required Vulkan instance extensions from SDL");
+    }
+
+    for (Uint32 i = 0; i < sdlExtensionCount; ++i) {
+        extensions.push_back(sdlExtensions[i]);
+    }
+
+    const bool validationEnabled =
+        config.createValidationLayers && vulkan::checkValidationLayerSupport();
+
+    if (validationEnabled) {
+        extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    }
+
+#ifdef __APPLE__
+    if (std::find_if(
+            extensions.begin(), extensions.end(), [](const char *extension) {
+                return std::strcmp(
+                           extension,
+                           VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0;
+            }) == extensions.end()) {
+        extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+    }
+    createInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
 #endif
 
+    createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
+    createInfo.ppEnabledExtensionNames = extensions.data();
+
+    VkDebugUtilsMessengerCreateInfoEXT debugInfo{};
+
+    if (validationEnabled) {
+        const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
+
+        createInfo.enabledLayerCount = 1;
+        createInfo.ppEnabledLayerNames = layers;
+
+        vulkan::configureDebugMessenger(debugInfo);
+        createInfo.pNext = &debugInfo;
+    } else if (config.createValidationLayers) {
+        detail::log(LogLevel::Warning,
+                    "Validation layer not available, proceeding without it");
+        createInfo.enabledLayerCount = 0;
+        createInfo.ppEnabledLayerNames = nullptr;
+    }
+
+    VULKAN_GUARD(vkCreateInstance(&createInfo, nullptr, &vulkanState.instance),
+                 "Failed to create Vulkan instance");
+
+    vulkanState.validationEnabled = validationEnabled;
+
+    if (validationEnabled) {
+        auto createDebugMessenger =
+            reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
+                vkGetInstanceProcAddr(vulkanState.instance,
+                                      "vkCreateDebugUtilsMessengerEXT"));
+
+        if (!createDebugMessenger) {
+            throw std::runtime_error(
+                "Failed to load vkCreateDebugUtilsMessengerEXT");
+        }
+
+        VULKAN_GUARD(createDebugMessenger(vulkanState.instance, &debugInfo,
+                                          nullptr, &vulkanState.debugMessenger),
+                     "Failed to create Vulkan debug messenger");
+    }
+#endif
 
     return context;
 }
@@ -229,6 +344,10 @@ SDL_Window *Context::makeWindow(int width, int height, const char *title,
 #ifdef METAL
     if (!config.useOpenGL) {
         windowFlags |= SDL_WINDOW_METAL;
+    }
+#elif VULKAN
+    if (!config.useOpenGL) {
+        windowFlags |= SDL_WINDOW_VULKAN;
     }
 #endif
     if (resizable) {
@@ -302,6 +421,28 @@ DeviceInfo Device::getDeviceInfo() {
     info.renderingVersion = "Metal 4.0";
     info.opalVersion = OPAL_VERSION;
     return info;
+#elif VULKAN
+    auto &state = vulkan::deviceState(this);
+    if (state.physicalDeviceInfo.device != VK_NULL_HANDLE) {
+        const VkPhysicalDeviceProperties &props =
+            state.physicalDeviceInfo.properties;
+        info.deviceName = props.deviceName;
+        info.vendorName = std::to_string(props.vendorID);
+        info.driverVersion = std::to_string(props.driverVersion);
+        info.renderingVersion =
+            std::to_string(VK_VERSION_MAJOR(props.apiVersion)) + "." +
+            std::to_string(VK_VERSION_MINOR(props.apiVersion)) + "." +
+            std::to_string(VK_VERSION_PATCH(props.apiVersion));
+        info.opalVersion = OPAL_VERSION;
+        return info;
+    } else {
+        info.deviceName = "Unknown Vulkan Device";
+        info.vendorName = "Unknown";
+        info.driverVersion = "N/A";
+        info.renderingVersion = "Unknown";
+        info.opalVersion = OPAL_VERSION;
+        return info;
+    }
 #else
     info.deviceName = "Unknown";
     info.vendorName = "Unknown";
@@ -384,6 +525,40 @@ Device::acquire([[maybe_unused]] const std::shared_ptr<Context> &context) {
 
     detail::log(LogLevel::Info, "Graphics device acquired (Metal)");
     return device;
+#elif VULKAN
+    auto device = std::make_shared<Device>();
+    Device::globalInstance = device.get();
+    device->context = context;
+
+    auto &vulkanState = vulkan::deviceState(device.get());
+    auto window = context->getWindow();
+    auto &vulkanContextState = vulkan::contextState(context.get());
+    if (!SDL_Vulkan_CreateSurface(window, vulkanContextState.instance, nullptr,
+                                  &vulkanContextState.surface)) {
+        throw std::runtime_error("Failed to create Vulkan surface");
+    }
+
+    vulkanState.physicalDeviceInfo = vulkan::buildQueuesAndPhysicalDevice(
+        vulkanContextState.instance, vulkanContextState.surface);
+    vulkanState.device =
+        vulkan::createLogicalDevice(vulkanState.physicalDeviceInfo);
+    vulkan::createQueues(vulkanState);
+    vulkan::createPools(vulkanState);
+
+    int width = 0;
+    int height = 0;
+
+    SDL_GetWindowSizeInPixels(window, &width, &height);
+
+    vulkan::createSwapchain(vulkanContextState, vulkanState, width, height);
+
+    vulkan::createSwapchainImages(vulkanContextState, vulkanState);
+    vulkanState.defaultDepthTexture = Texture::create(
+        TextureType::Texture2D, vulkan::chooseDepthTextureFormat(vulkanState),
+        vulkanContextState.swapchainExtent.width,
+        vulkanContextState.swapchainExtent.height,
+        TextureDataFormat::DepthComponent, nullptr, 1);
+    return device;
 #else
     throw std::runtime_error("No rendering backend selected");
 #endif
@@ -401,7 +576,5 @@ std::shared_ptr<Framebuffer> Device::getDefaultFramebuffer() {
 }
 
 Device *Device::globalInstance = nullptr;
-
-
 
 } // namespace opal
