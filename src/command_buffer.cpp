@@ -1189,6 +1189,10 @@ void CommandBuffer::start() {
     boundDrawingState = nullptr;
     renderPass = nullptr;
     framebuffer = nullptr;
+    hasCustomScissor = false;
+#ifdef OPENGL
+    glDisable(GL_SCISSOR_TEST);
+#endif
 #if defined(METAL)
     auto &state = metal::commandBufferState(this);
     for (size_t i = 0; i < state.inFlightCommandBuffers.size();) {
@@ -2174,6 +2178,68 @@ void CommandBuffer::bindPipeline(const std::shared_ptr<Pipeline> &pipeline) {
 
 void CommandBuffer::unbindPipeline() { boundPipeline = nullptr; }
 
+void CommandBuffer::setScissor(int x, int y, int width, int height) {
+    if (x < 0 || y < 0 || width <= 0 || height <= 0) {
+        throw std::invalid_argument(
+            "Scissor position must be non-negative and size must be positive");
+    }
+
+    hasCustomScissor = true;
+    scissorX = x;
+    scissorY = y;
+    scissorWidth = width;
+    scissorHeight = height;
+    applyScissor();
+}
+
+void CommandBuffer::applyScissor() {
+#ifdef OPENGL
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(scissorX, scissorY, scissorWidth, scissorHeight);
+#elif defined(METAL)
+    auto &state = metal::commandBufferState(this);
+    if (state.encoder != nullptr && framebuffer != nullptr) {
+        const int framebufferWidth = std::max(framebuffer->width, 1);
+        const int framebufferHeight = std::max(framebuffer->height, 1);
+        const int effectiveX = std::clamp(scissorX, 0, framebufferWidth);
+        const int effectiveY = std::clamp(scissorY, 0, framebufferHeight);
+        MTL::ScissorRect scissor{
+            static_cast<NS::UInteger>(effectiveX),
+            static_cast<NS::UInteger>(effectiveY),
+            static_cast<NS::UInteger>(std::clamp(
+                scissorWidth, 0, framebufferWidth - effectiveX)),
+            static_cast<NS::UInteger>(std::clamp(
+                scissorHeight, 0, framebufferHeight - effectiveY))};
+        state.encoder->setScissorRect(scissor);
+    }
+#elif defined(VULKAN)
+    auto &state = vulkan::commandBufferState(this);
+    if (state.rendering && framebuffer != nullptr) {
+        const VkExtent2D renderExtent =
+            vulkan::getRenderExtent(framebuffer, device);
+        const int framebufferWidth = static_cast<int>(renderExtent.width);
+        const int framebufferHeight = static_cast<int>(renderExtent.height);
+        VkRect2D scissor{};
+        scissor.offset = {std::clamp(scissorX, 0, framebufferWidth),
+                          std::clamp(scissorY, 0, framebufferHeight)};
+        scissor.extent = {
+            static_cast<uint32_t>(std::clamp(
+                scissorWidth, 0, framebufferWidth - scissor.offset.x)),
+            static_cast<uint32_t>(std::clamp(
+                scissorHeight, 0, framebufferHeight - scissor.offset.y))};
+        vkCmdSetScissor(state.commandBuffer, 0, 1, &scissor);
+    }
+#endif
+}
+
+void CommandBuffer::resetScissor() {
+    hasCustomScissor = false;
+
+#ifdef OPENGL
+    glDisable(GL_SCISSOR_TEST);
+#endif
+}
+
 void CommandBuffer::bindDrawingState(
     std::shared_ptr<DrawingState> drawingState) {
     boundDrawingState = std::move(drawingState);
@@ -2203,6 +2269,9 @@ auto CommandBuffer::draw(uint vertexCount, uint instanceCount, uint firstVertex,
                         clearColorValue, clearDepthValue);
     if (state.encoder == nullptr) {
         return;
+    }
+    if (hasCustomScissor) {
+        applyScissor();
     }
 
     if (boundDrawingState != nullptr &&
@@ -2267,6 +2336,9 @@ auto CommandBuffer::draw(uint vertexCount, uint instanceCount, uint firstVertex,
         vulkan::getRenderExtent(framebuffer, device);
 
     vulkan::bindPipeline(this, boundPipeline.get(), target, targetExtent);
+    if (hasCustomScissor) {
+        applyScissor();
+    }
 
     vulkan::bindVulkanDrawingState(this, boundDrawingState, boundPipeline);
 
@@ -2308,6 +2380,9 @@ void CommandBuffer::drawIndexed(uint indexCount, uint instanceCount,
                         clearColorValue, clearDepthValue);
     if (state.encoder == nullptr) {
         return;
+    }
+    if (hasCustomScissor) {
+        applyScissor();
     }
 
     if (boundDrawingState->vertexBuffer != nullptr) {
@@ -2371,6 +2446,9 @@ void CommandBuffer::drawIndexed(uint indexCount, uint instanceCount,
     const VkExtent2D extent = vulkan::getRenderExtent(framebuffer, device);
 
     vulkan::bindPipeline(this, boundPipeline.get(), target, extent);
+    if (hasCustomScissor) {
+        applyScissor();
+    }
 
     vulkan::bindVulkanDrawingState(this, boundDrawingState, boundPipeline);
 
@@ -2413,6 +2491,9 @@ void CommandBuffer::drawPatches(uint vertexCount, uint firstVertex,
                         clearColorValue, clearDepthValue);
     if (state.encoder == nullptr) {
         return;
+    }
+    if (hasCustomScissor) {
+        applyScissor();
     }
 
     if (boundDrawingState != nullptr &&
@@ -2464,6 +2545,9 @@ void CommandBuffer::drawPatches(uint vertexCount, uint firstVertex,
     const auto extent = vulkan::getRenderExtent(framebuffer, device);
 
     vulkan::bindPipeline(this, boundPipeline.get(), target, extent);
+    if (hasCustomScissor) {
+        applyScissor();
+    }
     vulkan::bindVulkanDrawingState(this, boundDrawingState, boundPipeline);
 
     vkCmdDraw(state.commandBuffer, vertexCount, 1, firstVertex, 0);

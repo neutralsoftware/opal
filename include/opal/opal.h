@@ -960,6 +960,8 @@ class CommandBuffer {
     // The different commands
     void bindPipeline(const std::shared_ptr<Pipeline> &pipeline);
     void unbindPipeline();
+    void setScissor(int x, int y, int width, int height);
+    void resetScissor();
     void bindDrawingState(std::shared_ptr<DrawingState> drawingState);
     void unbindDrawingState();
     void draw(uint vertexCount, uint instanceCount = 1, uint firstVertex = 0,
@@ -1016,6 +1018,12 @@ class CommandBuffer {
     int drawCallCount = 0;
 
     bool hasStarted = false;
+    bool hasCustomScissor = false;
+    int scissorX = 0;
+    int scissorY = 0;
+    int scissorWidth = 0;
+    int scissorHeight = 0;
+    void applyScissor();
 
     friend class Device;
     std::shared_ptr<Pipeline> boundPipeline = nullptr;
