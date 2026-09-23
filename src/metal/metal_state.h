@@ -146,6 +146,7 @@ struct PipelineState {
     MTL::BlendFactor blendSrc = MTL::BlendFactorOne;
     MTL::BlendFactor blendDst = MTL::BlendFactorZero;
     MTL::BlendOperation blendOp = MTL::BlendOperationAdd;
+    MTL::ColorWriteMask colorWriteMask = MTL::ColorWriteMaskAll;
     bool polygonOffsetEnabled = false;
     float polygonOffsetFactor = 0.0f;
     float polygonOffsetUnits = 0.0f;

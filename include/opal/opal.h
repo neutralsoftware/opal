@@ -535,6 +535,7 @@ class Pipeline {
     void enableBlending(bool enabled);
     void setBlendFunc(BlendFunc srcFactor, BlendFunc dstFactor);
     void setBlendEquation(BlendEquation equation);
+    void setColorWriteMask(bool red, bool green, bool blue, bool alpha);
 
     void enableMultisampling(bool enabled);
     void enablePolygonOffset(bool enabled);
@@ -628,6 +629,10 @@ class Pipeline {
     BlendFunc blendSrcFactor = BlendFunc::One;
     BlendFunc blendDstFactor = BlendFunc::Zero;
     BlendEquation blendEquation = BlendEquation::Add;
+    bool colorWriteRed = true;
+    bool colorWriteGreen = true;
+    bool colorWriteBlue = true;
+    bool colorWriteAlpha = true;
     bool depthTestEnabled = false;
     bool depthWriteEnabled = true;
     CompareOp depthCompareOp = CompareOp::Less;

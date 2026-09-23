@@ -418,6 +418,13 @@ void Pipeline::setBlendEquation(BlendEquation equation) {
     this->blendEquation = equation;
 }
 
+void Pipeline::setColorWriteMask(bool red, bool green, bool blue, bool alpha) {
+    colorWriteRed = red;
+    colorWriteGreen = green;
+    colorWriteBlue = blue;
+    colorWriteAlpha = alpha;
+}
+
 void Pipeline::enableMultisampling(bool enabled) {
     this->multisamplingEnabled = enabled;
 }
@@ -936,9 +943,23 @@ void Pipeline::build() {
         state.colorBlendAttachment.alphaBlendOp =
             vulkan::blenderOpToVk(blendEquation);
 
-        state.colorBlendAttachment.colorWriteMask =
-            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        state.colorBlendAttachment.colorWriteMask = 0;
+        if (colorWriteRed) {
+            state.colorBlendAttachment.colorWriteMask |=
+                VK_COLOR_COMPONENT_R_BIT;
+        }
+        if (colorWriteGreen) {
+            state.colorBlendAttachment.colorWriteMask |=
+                VK_COLOR_COMPONENT_G_BIT;
+        }
+        if (colorWriteBlue) {
+            state.colorBlendAttachment.colorWriteMask |=
+                VK_COLOR_COMPONENT_B_BIT;
+        }
+        if (colorWriteAlpha) {
+            state.colorBlendAttachment.colorWriteMask |=
+                VK_COLOR_COMPONENT_A_BIT;
+        }
 
         if (primitiveStyle == PrimitiveStyle::Patches) {
             if (!device.physicalDeviceInfo.features.features
@@ -995,6 +1016,10 @@ void Pipeline::bind() {
     }
 
     glDepthMask(this->depthWriteEnabled ? GL_TRUE : GL_FALSE);
+    glColorMask(colorWriteRed ? GL_TRUE : GL_FALSE,
+                colorWriteGreen ? GL_TRUE : GL_FALSE,
+                colorWriteBlue ? GL_TRUE : GL_FALSE,
+                colorWriteAlpha ? GL_TRUE : GL_FALSE);
 
     if (this->blendingEnabled) {
         glEnable(GL_BLEND);
@@ -1042,6 +1067,19 @@ void Pipeline::bind() {
     state.blendSrc = toMetalBlendFactor(this->blendSrcFactor);
     state.blendDst = toMetalBlendFactor(this->blendDstFactor);
     state.blendOp = toMetalBlendOperation(this->blendEquation);
+    state.colorWriteMask = MTL::ColorWriteMaskNone;
+    if (colorWriteRed) {
+        state.colorWriteMask |= MTL::ColorWriteMaskRed;
+    }
+    if (colorWriteGreen) {
+        state.colorWriteMask |= MTL::ColorWriteMaskGreen;
+    }
+    if (colorWriteBlue) {
+        state.colorWriteMask |= MTL::ColorWriteMaskBlue;
+    }
+    if (colorWriteAlpha) {
+        state.colorWriteMask |= MTL::ColorWriteMaskAlpha;
+    }
     state.polygonOffsetEnabled = this->polygonOffsetEnabled;
     state.polygonOffsetFactor = this->polygonOffsetFactor;
     state.polygonOffsetUnits = this->polygonOffsetUnits;
@@ -1102,6 +1140,12 @@ bool Pipeline::operator==(const std::shared_ptr<Pipeline> &pipeline) const {
         return false;
     }
     if (this->blendDstFactor != pipeline->blendDstFactor) {
+        return false;
+    }
+    if (this->colorWriteRed != pipeline->colorWriteRed ||
+        this->colorWriteGreen != pipeline->colorWriteGreen ||
+        this->colorWriteBlue != pipeline->colorWriteBlue ||
+        this->colorWriteAlpha != pipeline->colorWriteAlpha) {
         return false;
     }
     if (this->depthTestEnabled != pipeline->depthTestEnabled) {

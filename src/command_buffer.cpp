@@ -541,6 +541,8 @@ getRenderPipelineState(Device *device,
     key += "|" + std::to_string(static_cast<int>(pipelineState.blendDst));
     key += "|" + std::to_string(static_cast<int>(pipelineState.blendOp));
     key +=
+        "|" + std::to_string(static_cast<int>(pipelineState.colorWriteMask));
+    key +=
         "|" + std::to_string(static_cast<int>(pipelineState.depthTestEnabled));
     key +=
         "|" + std::to_string(static_cast<int>(pipelineState.depthWriteEnabled));
@@ -565,7 +567,7 @@ getRenderPipelineState(Device *device,
             continue;
         }
         attachment->setPixelFormat(colorFormats[i]);
-        attachment->setWriteMask(MTL::ColorWriteMaskAll);
+        attachment->setWriteMask(pipelineState.colorWriteMask);
         attachment->setBlendingEnabled(pipelineState.blendingEnabled);
         if (pipelineState.blendingEnabled) {
             attachment->setRgbBlendOperation(pipelineState.blendOp);
