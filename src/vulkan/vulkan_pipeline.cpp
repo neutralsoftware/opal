@@ -60,6 +60,45 @@ VkBlendOp blenderOpToVk(BlendEquation op) {
     }
 }
 
+VkLogicOp logicOpToVk(LogicOp op) {
+    switch (op) {
+    case LogicOp::Clear:
+        return VK_LOGIC_OP_CLEAR;
+    case LogicOp::And:
+        return VK_LOGIC_OP_AND;
+    case LogicOp::AndReverse:
+        return VK_LOGIC_OP_AND_REVERSE;
+    case LogicOp::Copy:
+        return VK_LOGIC_OP_COPY;
+    case LogicOp::AndInverted:
+        return VK_LOGIC_OP_AND_INVERTED;
+    case LogicOp::NoOp:
+        return VK_LOGIC_OP_NO_OP;
+    case LogicOp::Xor:
+        return VK_LOGIC_OP_XOR;
+    case LogicOp::Or:
+        return VK_LOGIC_OP_OR;
+    case LogicOp::Nor:
+        return VK_LOGIC_OP_NOR;
+    case LogicOp::Equivalent:
+        return VK_LOGIC_OP_EQUIVALENT;
+    case LogicOp::Invert:
+        return VK_LOGIC_OP_INVERT;
+    case LogicOp::OrReverse:
+        return VK_LOGIC_OP_OR_REVERSE;
+    case LogicOp::CopyInverted:
+        return VK_LOGIC_OP_COPY_INVERTED;
+    case LogicOp::OrInverted:
+        return VK_LOGIC_OP_OR_INVERTED;
+    case LogicOp::Nand:
+        return VK_LOGIC_OP_NAND;
+    case LogicOp::Set:
+        return VK_LOGIC_OP_SET;
+    default:
+        return VK_LOGIC_OP_COPY;
+    }
+}
+
 VkCompareOp compareOpToVk(CompareOp op) {
     switch (op) {
     case CompareOp::Never:
@@ -360,7 +399,8 @@ VkPipeline createOrGetGraphicsPipeline(Pipeline *pipeline,
 
     VkPipelineColorBlendStateCreateInfo colorBlend{};
     colorBlend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    colorBlend.logicOpEnable = VK_FALSE;
+    colorBlend.logicOpEnable = state.logicOpEnabled ? VK_TRUE : VK_FALSE;
+    colorBlend.logicOp = state.logicOp;
     colorBlend.attachmentCount = static_cast<uint32_t>(blendAttachments.size());
     colorBlend.pAttachments =
         blendAttachments.empty() ? nullptr : blendAttachments.data();

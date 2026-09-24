@@ -462,6 +462,25 @@ enum class BlendFunc {
 
 enum class BlendEquation { Add, Subtract, ReverseSubtract, Min, Max };
 
+enum class LogicOp {
+    Clear,
+    And,
+    AndReverse,
+    Copy,
+    AndInverted,
+    NoOp,
+    Xor,
+    Or,
+    Nor,
+    Equivalent,
+    Invert,
+    OrReverse,
+    CopyInverted,
+    OrInverted,
+    Nand,
+    Set
+};
+
 struct VertexAttribute {
     std::string name;
     VertexAttributeType type;
@@ -535,6 +554,8 @@ class Pipeline {
     void enableBlending(bool enabled);
     void setBlendFunc(BlendFunc srcFactor, BlendFunc dstFactor);
     void setBlendEquation(BlendEquation equation);
+    void enableLogicOp(bool enabled);
+    void setLogicOp(LogicOp op);
     void setColorWriteMask(bool red, bool green, bool blue, bool alpha);
 
     void enableMultisampling(bool enabled);
@@ -629,6 +650,8 @@ class Pipeline {
     BlendFunc blendSrcFactor = BlendFunc::One;
     BlendFunc blendDstFactor = BlendFunc::Zero;
     BlendEquation blendEquation = BlendEquation::Add;
+    bool logicOpEnabled = false;
+    LogicOp logicOp = LogicOp::Copy;
     bool colorWriteRed = true;
     bool colorWriteGreen = true;
     bool colorWriteBlue = true;
@@ -649,6 +672,7 @@ class Pipeline {
 
     uint getGLBlendFactor(BlendFunc factor) const;
     uint getGLBlendEquation(BlendEquation equation) const;
+    uint getGLLogicOp(LogicOp op) const;
     uint getGLCompareOp(CompareOp op) const;
     uint getGLPrimitiveStyle(PrimitiveStyle style) const;
     uint getGLRasterizerMode(RasterizerMode mode) const;

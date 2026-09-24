@@ -418,6 +418,10 @@ void Pipeline::setBlendEquation(BlendEquation equation) {
     this->blendEquation = equation;
 }
 
+void Pipeline::enableLogicOp(bool enabled) { this->logicOpEnabled = enabled; }
+
+void Pipeline::setLogicOp(LogicOp op) { this->logicOp = op; }
+
 void Pipeline::setColorWriteMask(bool red, bool green, bool blue, bool alpha) {
     colorWriteRed = red;
     colorWriteGreen = green;
@@ -495,6 +499,45 @@ uint Pipeline::getGLBlendEquation(BlendEquation equation) const {
         return GL_MAX;
     default:
         return GL_FUNC_ADD;
+    }
+}
+
+uint Pipeline::getGLLogicOp(LogicOp op) const {
+    switch (op) {
+    case LogicOp::Clear:
+        return GL_CLEAR;
+    case LogicOp::And:
+        return GL_AND;
+    case LogicOp::AndReverse:
+        return GL_AND_REVERSE;
+    case LogicOp::Copy:
+        return GL_COPY;
+    case LogicOp::AndInverted:
+        return GL_AND_INVERTED;
+    case LogicOp::NoOp:
+        return GL_NOOP;
+    case LogicOp::Xor:
+        return GL_XOR;
+    case LogicOp::Or:
+        return GL_OR;
+    case LogicOp::Nor:
+        return GL_NOR;
+    case LogicOp::Equivalent:
+        return GL_EQUIV;
+    case LogicOp::Invert:
+        return GL_INVERT;
+    case LogicOp::OrReverse:
+        return GL_OR_REVERSE;
+    case LogicOp::CopyInverted:
+        return GL_COPY_INVERTED;
+    case LogicOp::OrInverted:
+        return GL_OR_INVERTED;
+    case LogicOp::Nand:
+        return GL_NAND;
+    case LogicOp::Set:
+        return GL_SET;
+    default:
+        return GL_COPY;
     }
 }
 
@@ -606,6 +649,10 @@ void Pipeline::build() {
 #ifdef OPENGL
     (void)this; // Vertex layout applied explicitly per VAO.
 #elif defined(METAL)
+    if (logicOpEnabled) {
+        throw std::runtime_error(
+            "Metal does not support fixed-function logic operations");
+    }
     if (Device::globalInstance == nullptr) {
         throw std::runtime_error("Cannot build Metal pipeline without device");
     }
@@ -928,8 +975,15 @@ void Pipeline::build() {
         state.depthStencil.depthBoundsTestEnable = VK_FALSE;
         state.depthStencil.stencilTestEnable = VK_FALSE;
 
+        if (logicOpEnabled &&
+            !device.physicalDeviceInfo.features.features.logicOp) {
+            throw std::runtime_error(
+                "Selected Vulkan device does not support logic operations");
+        }
+        state.logicOpEnabled = logicOpEnabled;
+        state.logicOp = vulkan::logicOpToVk(logicOp);
         state.colorBlendAttachment.blendEnable =
-            blendingEnabled ? VK_TRUE : VK_FALSE;
+            blendingEnabled && !logicOpEnabled ? VK_TRUE : VK_FALSE;
         state.colorBlendAttachment.srcColorBlendFactor =
             vulkan::blenderFuncToVk(blendSrcFactor);
         state.colorBlendAttachment.dstColorBlendFactor =
@@ -1021,7 +1075,14 @@ void Pipeline::bind() {
                 colorWriteBlue ? GL_TRUE : GL_FALSE,
                 colorWriteAlpha ? GL_TRUE : GL_FALSE);
 
-    if (this->blendingEnabled) {
+    if (this->logicOpEnabled) {
+        glEnable(GL_COLOR_LOGIC_OP);
+        glLogicOp(this->getGLLogicOp(this->logicOp));
+    } else {
+        glDisable(GL_COLOR_LOGIC_OP);
+    }
+
+    if (this->blendingEnabled && !this->logicOpEnabled) {
         glEnable(GL_BLEND);
         glBlendFunc(this->getGLBlendFactor(this->blendSrcFactor),
                     this->getGLBlendFactor(this->blendDstFactor));
@@ -1055,6 +1116,10 @@ void Pipeline::bind() {
         }
     }
 #elif defined(METAL)
+    if (logicOpEnabled) {
+        throw std::runtime_error(
+            "Metal does not support fixed-function logic operations");
+    }
     auto &state = metal::pipelineState(this);
     state.primitiveType = toMetalPrimitive(this->primitiveStyle);
     state.cullMode = toMetalCull(this->cullMode);
@@ -1134,6 +1199,12 @@ bool Pipeline::operator==(const std::shared_ptr<Pipeline> &pipeline) const {
         return false;
     }
     if (this->blendingEnabled != pipeline->blendingEnabled) {
+        return false;
+    }
+    if (this->logicOpEnabled != pipeline->logicOpEnabled) {
+        return false;
+    }
+    if (this->logicOp != pipeline->logicOp) {
         return false;
     }
     if (this->blendSrcFactor != pipeline->blendSrcFactor) {

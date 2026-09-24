@@ -367,6 +367,8 @@ struct PipelineState {
     bool hasTessellation = false;
 
     VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+    bool logicOpEnabled = false;
+    VkLogicOp logicOp = VK_LOGIC_OP_COPY;
 
     std::vector<VkDynamicState> dynamicStates;
 
@@ -483,6 +485,8 @@ inline uint64_t bindingKey(uint32_t set, uint32_t binding) {
 
 VkBlendFactor blenderFuncToVk(BlendFunc func);
 VkBlendOp blenderOpToVk(BlendEquation op);
+
+VkLogicOp logicOpToVk(LogicOp op);
 
 VkCompareOp compareOpToVk(CompareOp op);
 VkPrimitiveTopology primitiveStyleToVk(PrimitiveStyle style);
