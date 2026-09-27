@@ -57,7 +57,9 @@ void Context::createInstance() {
 
     auto extensions = this->getExtensions();
 
+#ifdef __APPLE__
     createInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+#endif
 
     createInfo.enabledExtensionCount = extensions.size();
     createInfo.ppEnabledExtensionNames = extensions.data();
@@ -123,7 +125,9 @@ std::vector<const char *> Context::getExtensions() {
         extensions.emplace_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     }
 
+#ifdef __APPLE__
     extensions.emplace_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+#endif
 
     return extensions;
 }
