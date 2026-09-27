@@ -21,8 +21,37 @@ bool Device::deviceMeetsRequirements(VkPhysicalDevice device) {
     VkPhysicalDeviceFeatures deviceFeatures;
     vkGetPhysicalDeviceFeatures(device, &deviceFeatures);
 
-    if (!this->supportsDeviceExtension(device,
-                                       VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
+    const char *requiredExtensions[] = {
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
+        VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+        VK_KHR_RAY_QUERY_EXTENSION_NAME,
+        VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
+    };
+    for (const char *extension : requiredExtensions) {
+        if (!this->supportsDeviceExtension(device, extension)) {
+            return false;
+        }
+    }
+
+    VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{};
+    rayQueryFeatures.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationFeatures{};
+    accelerationFeatures.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+    accelerationFeatures.pNext = &rayQueryFeatures;
+    VkPhysicalDeviceBufferDeviceAddressFeatures bufferAddressFeatures{};
+    bufferAddressFeatures.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+    bufferAddressFeatures.pNext = &accelerationFeatures;
+    VkPhysicalDeviceFeatures2 availableFeatures{};
+    availableFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    availableFeatures.pNext = &bufferAddressFeatures;
+    vkGetPhysicalDeviceFeatures2(device, &availableFeatures);
+    if (!bufferAddressFeatures.bufferDeviceAddress ||
+        !accelerationFeatures.accelerationStructure ||
+        !rayQueryFeatures.rayQuery) {
         return false;
     }
 
@@ -134,6 +163,25 @@ void Device::createLogicalDevice(std::shared_ptr<Context> context) {
     indexingFeatures.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
     indexingFeatures.descriptorBindingPartiallyBound = VK_TRUE;
 
+    VkPhysicalDeviceBufferDeviceAddressFeatures bufferAddressFeatures{};
+    bufferAddressFeatures.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+    bufferAddressFeatures.bufferDeviceAddress = VK_TRUE;
+
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationFeatures{};
+    accelerationFeatures.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+    accelerationFeatures.accelerationStructure = VK_TRUE;
+
+    VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{};
+    rayQueryFeatures.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+    rayQueryFeatures.rayQuery = VK_TRUE;
+
+    indexingFeatures.pNext = &bufferAddressFeatures;
+    bufferAddressFeatures.pNext = &accelerationFeatures;
+    accelerationFeatures.pNext = &rayQueryFeatures;
+
     VkPhysicalDeviceFeatures2 deviceFeatures2{};
     deviceFeatures2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     deviceFeatures2.features = deviceFeatures;
@@ -148,7 +196,11 @@ void Device::createLogicalDevice(std::shared_ptr<Context> context) {
     createInfo.pNext = &deviceFeatures2;
 
     std::vector<const char *> deviceExtensions = {
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
+        VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+        VK_KHR_RAY_QUERY_EXTENSION_NAME,
+        VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME};
 
     if (this->supportsDeviceExtension(this->physicalDevice,
                                       "VK_KHR_portability_subset")) {

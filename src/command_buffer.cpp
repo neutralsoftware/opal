@@ -1606,6 +1606,11 @@ void CommandBuffer::bindPipeline(const std::shared_ptr<Pipeline> &pipeline) {
 #endif
     pipeline->bind();
 #ifdef VULKAN
+    if (pipeline->shaderProgram != nullptr &&
+        pipeline->shaderProgram->isComputeProgram()) {
+        boundPipeline = pipeline;
+        return;
+    }
 #endif
     boundPipeline = pipeline;
 #ifdef VULKAN
@@ -2104,10 +2109,24 @@ void CommandBuffer::dispatch(uint threadCountX, uint threadCountY,
     (void)threadCountZ;
     throw std::runtime_error("Compute dispatch is not supported on OpenGL");
 #elif defined(VULKAN)
-    (void)threadCountX;
-    (void)threadCountY;
-    (void)threadCountZ;
-    throw std::runtime_error("Compute dispatch is not implemented for Vulkan");
+    if (boundPipeline == nullptr || boundPipeline->shaderProgram == nullptr ||
+        !boundPipeline->shaderProgram->isComputeProgram() ||
+        boundPipeline->computePipeline == VK_NULL_HANDLE) {
+        throw std::runtime_error("Vulkan compute pipeline is unavailable");
+    }
+    beginCommandBufferIfNeeded();
+    VkCommandBuffer commandBuffer = commandBuffers[currentFrame];
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      boundPipeline->computePipeline);
+    boundPipeline->bindDescriptorSets(commandBuffer,
+                                      VK_PIPELINE_BIND_POINT_COMPUTE);
+    boundPipeline->flushPushConstants(commandBuffer);
+    uint groupX = std::max<uint>(1, boundPipeline->getComputeThreadgroupSizeX());
+    uint groupY = std::max<uint>(1, boundPipeline->getComputeThreadgroupSizeY());
+    uint groupZ = std::max<uint>(1, boundPipeline->getComputeThreadgroupSizeZ());
+    vkCmdDispatch(commandBuffer, (threadCountX + groupX - 1) / groupX,
+                  (threadCountY + groupY - 1) / groupY,
+                  (threadCountZ + groupZ - 1) / groupZ);
 #elif defined(METAL)
     if (boundPipeline == nullptr || boundPipeline->shaderProgram == nullptr) {
         return;
@@ -2217,7 +2236,17 @@ void CommandBuffer::dispatch(uint threadCountX, uint threadCountY,
 }
 
 void CommandBuffer::computeBarrier() {
-#ifdef METAL
+#ifdef VULKAN
+    beginCommandBufferIfNeeded();
+    VkMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(commandBuffers[currentFrame],
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier,
+                         0, nullptr, 0, nullptr);
+#elif defined(METAL)
     auto &state = metal::commandBufferState(this);
     if (state.computeEncoder != nullptr) {
         state.computeEncoder->memoryBarrier(MTL::BarrierScope(
@@ -2377,7 +2406,7 @@ void CommandBuffer::clear(float r, float g, float b, float a, float depth) {
 #endif
 }
 
-#ifdef METAL
+#if defined(METAL) || defined(VULKAN)
 void CommandBuffer::bindPrimitiveAccelerationStructure(
     const std::shared_ptr<PrimitiveAccelerationStructure> &as,
     uint32_t binding) {
@@ -2385,9 +2414,43 @@ void CommandBuffer::bindPrimitiveAccelerationStructure(
         throw std::runtime_error(
             "Cannot bind an acceleration structure without a pipeline");
     }
+#ifdef METAL
     auto &pipelineState = metal::pipelineState(boundPipeline.get());
     pipelineState.instanceAccelerationStructures.erase(binding);
     pipelineState.primitiveAccelerationStructures[binding] = as;
+#else
+    if (as == nullptr || as->blas == VK_NULL_HANDLE || !as->isBuilt) {
+        throw std::runtime_error("Vulkan primitive acceleration structure is unavailable");
+    }
+    const UniformBindingInfo *info = nullptr;
+    for (const auto &entry : boundPipeline->shaderProgram->uniformBindings) {
+        const auto &candidate = entry.second;
+        if (candidate.binding == binding && candidate.isAccelerationStructure) {
+            info = &candidate;
+            break;
+        }
+    }
+    if (info == nullptr) {
+        throw std::runtime_error("Vulkan acceleration structure binding was not reflected");
+    }
+    boundPipeline->ensureDescriptorResources();
+    VkWriteDescriptorSetAccelerationStructureKHR accelerationInfo{};
+    accelerationInfo.sType =
+        VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+    accelerationInfo.accelerationStructureCount = 1;
+    accelerationInfo.pAccelerationStructures = &as->blas;
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.pNext = &accelerationInfo;
+    write.dstSet = boundPipeline->descriptorSets[info->set];
+    write.dstBinding = info->binding;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    vkUpdateDescriptorSets(Device::globalDevice, 1, &write, 0, nullptr);
+    auto key = Pipeline::makeBindingKey(info->set, info->binding);
+    boundPipeline->descriptorInstanceAccelerationStructures.erase(key);
+    boundPipeline->descriptorAccelerationStructures[key] = as;
+#endif
 }
 
 void CommandBuffer::bindInstanceAccelerationStructure(
@@ -2397,9 +2460,43 @@ void CommandBuffer::bindInstanceAccelerationStructure(
         throw std::runtime_error(
             "Cannot bind an acceleration structure without a pipeline");
     }
+#ifdef METAL
     auto &pipelineState = metal::pipelineState(boundPipeline.get());
     pipelineState.primitiveAccelerationStructures.erase(binding);
     pipelineState.instanceAccelerationStructures[binding] = as;
+#else
+    if (as == nullptr || as->tlas == VK_NULL_HANDLE || !as->isBuilt) {
+        throw std::runtime_error("Vulkan instance acceleration structure is unavailable");
+    }
+    const UniformBindingInfo *info = nullptr;
+    for (const auto &entry : boundPipeline->shaderProgram->uniformBindings) {
+        const auto &candidate = entry.second;
+        if (candidate.binding == binding && candidate.isAccelerationStructure) {
+            info = &candidate;
+            break;
+        }
+    }
+    if (info == nullptr) {
+        throw std::runtime_error("Vulkan acceleration structure binding was not reflected");
+    }
+    boundPipeline->ensureDescriptorResources();
+    VkWriteDescriptorSetAccelerationStructureKHR accelerationInfo{};
+    accelerationInfo.sType =
+        VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+    accelerationInfo.accelerationStructureCount = 1;
+    accelerationInfo.pAccelerationStructures = &as->tlas;
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.pNext = &accelerationInfo;
+    write.dstSet = boundPipeline->descriptorSets[info->set];
+    write.dstBinding = info->binding;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    vkUpdateDescriptorSets(Device::globalDevice, 1, &write, 0, nullptr);
+    auto key = Pipeline::makeBindingKey(info->set, info->binding);
+    boundPipeline->descriptorAccelerationStructures.erase(key);
+    boundPipeline->descriptorInstanceAccelerationStructures[key] = as;
+#endif
 }
 #endif
 

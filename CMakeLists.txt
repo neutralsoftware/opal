@@ -112,7 +112,10 @@ elseif(OPAL_BACKEND STREQUAL "VULKAN")
         src/vulkan/vulkanDevice.cpp
     )
     target_compile_definitions(opal PUBLIC VULKAN GLM_FORCE_DEPTH_ZERO_TO_ONE)
-    target_link_libraries(opal PRIVATE Vulkan::Vulkan spirv-cross-core spirv-cross-glsl spirv-cross-reflect)
+    target_link_libraries(opal
+        PUBLIC Vulkan::Vulkan
+        PRIVATE spirv-cross-core spirv-cross-glsl spirv-cross-reflect
+    )
 elseif(OPAL_BACKEND STREQUAL "OPENGL")
     find_package(OpenGL REQUIRED)
     target_sources(opal PRIVATE third-party/glad/glad.c)

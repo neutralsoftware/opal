@@ -493,7 +493,15 @@ void Pipeline::buildPipelineLayout() {
 
             for (const auto &pair : shader->uniformBindings) {
                 const UniformBindingInfo &info = pair.second;
-                if (info.isBuffer) {
+                if (info.isAccelerationStructure) {
+                    auto &binding =
+                        descriptorBindingInfo[info.set][info.binding];
+                    binding.type =
+                        VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+                    binding.stageFlags |= stageFlag;
+                    binding.count = 1;
+                    binding.isAccelerationStructure = true;
+                } else if (info.isBuffer) {
                     // This is a buffer - add to descriptor set layout
                     auto &binding =
                         descriptorBindingInfo[info.set][info.binding];
@@ -513,7 +521,7 @@ void Pipeline::buildPipelineLayout() {
                         descriptorBindingInfo[info.set][info.binding];
                     binding.type = info.resourceType;
                     binding.stageFlags |= stageFlag;
-                    binding.count = 1;
+                    binding.count = std::max<uint32_t>(1, info.size);
                     binding.isBuffer = false;
                     binding.isSampler = true;
                     binding.isCubemap = info.isCubemap;
@@ -541,30 +549,22 @@ void Pipeline::buildPipelineLayout() {
         uint32_t maxSet = descriptorBindingInfo.rbegin()->first;
         descriptorSetLayouts.resize(maxSet + 1, VK_NULL_HANDLE);
 
-        for (const auto &setPair : descriptorBindingInfo) {
-            uint32_t setIndex = setPair.first;
-            const auto &bindings = setPair.second;
+        for (uint32_t setIndex = 0; setIndex <= maxSet; ++setIndex) {
+            const auto setIterator = descriptorBindingInfo.find(setIndex);
+            const bool hasBindings = setIterator != descriptorBindingInfo.end();
 
             std::vector<VkDescriptorSetLayoutBinding> layoutBindings;
-            std::vector<VkDescriptorBindingFlags> bindingFlags;
-            for (const auto &bindingPair : bindings) {
-                VkDescriptorSetLayoutBinding layoutBinding{};
-                layoutBinding.binding = bindingPair.first;
-                layoutBinding.descriptorType = bindingPair.second.type;
-                layoutBinding.descriptorCount = bindingPair.second.count;
-                layoutBinding.stageFlags = bindingPair.second.stageFlags;
-                layoutBinding.pImmutableSamplers = nullptr;
-                layoutBindings.push_back(layoutBinding);
-                bindingFlags.push_back(
-                    VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
+            if (hasBindings) {
+                for (const auto &bindingPair : setIterator->second) {
+                    VkDescriptorSetLayoutBinding layoutBinding{};
+                    layoutBinding.binding = bindingPair.first;
+                    layoutBinding.descriptorType = bindingPair.second.type;
+                    layoutBinding.descriptorCount = bindingPair.second.count;
+                    layoutBinding.stageFlags = bindingPair.second.stageFlags;
+                    layoutBinding.pImmutableSamplers = nullptr;
+                    layoutBindings.push_back(layoutBinding);
+                }
             }
-
-            VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsInfo{};
-            bindingFlagsInfo.sType =
-                VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-            bindingFlagsInfo.bindingCount =
-                static_cast<uint32_t>(bindingFlags.size());
-            bindingFlagsInfo.pBindingFlags = bindingFlags.data();
 
             VkDescriptorSetLayoutCreateInfo layoutInfo{};
             layoutInfo.sType =
@@ -572,9 +572,6 @@ void Pipeline::buildPipelineLayout() {
             layoutInfo.bindingCount =
                 static_cast<uint32_t>(layoutBindings.size());
             layoutInfo.pBindings = layoutBindings.data();
-            layoutInfo.flags =
-                VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
-            layoutInfo.pNext = &bindingFlagsInfo;
 
             if (vkCreateDescriptorSetLayout(
                     Device::globalDevice, &layoutInfo, nullptr,

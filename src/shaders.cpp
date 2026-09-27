@@ -726,6 +726,9 @@ void Shader::performReflection() {
         samplerInfo.isBuffer = false;
         samplerInfo.isStorageBuffer = false;
         samplerInfo.isCubemap = isCube;
+        if (!samplerType.array.empty()) {
+            samplerInfo.size = samplerType.array.front();
+        }
         registerBinding(sampler.name, samplerInfo, false);
     }
 
@@ -795,6 +798,18 @@ void Shader::performReflection() {
         ssboInfo.isCubemap = false;
         registerBinding(ssbo.name, ssboInfo, true);
         registerBinding(compiler.get_name(ssbo.id), ssboInfo, true);
+    }
+
+    for (const auto &resource : resources.acceleration_structures) {
+        UniformBindingInfo info{};
+        info.set =
+            compiler.get_decoration(resource.id, spv::DecorationDescriptorSet);
+        info.binding =
+            compiler.get_decoration(resource.id, spv::DecorationBinding);
+        info.isAccelerationStructure = true;
+        info.resourceType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        registerBinding(resource.name, info, false);
+        registerBinding(compiler.get_name(resource.id), info, false);
     }
 }
 

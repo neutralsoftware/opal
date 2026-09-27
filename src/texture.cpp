@@ -957,7 +957,10 @@ void Pipeline::bindTexture(const std::string &name,
         return;
     }
 
-    VkImageLayout desiredLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkImageLayout desiredLayout =
+        info->resourceType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+            ? VK_IMAGE_LAYOUT_GENERAL
+            : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     if (texture->currentLayout != desiredLayout &&
         texture->currentLayout != VK_IMAGE_LAYOUT_GENERAL) {
         VkFormat vkFormat = opalTextureFormatToVulkanFormat(texture->format);
@@ -988,7 +991,7 @@ void Pipeline::bindTexture(const std::string &name,
     write.dstSet = descriptorSets[info->set];
     write.dstBinding = info->binding;
     write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.descriptorType = info->resourceType;
     write.pImageInfo = &imageInfo;
 
     vkUpdateDescriptorSets(Device::globalDevice, 1, &write, 0, nullptr);
@@ -1023,13 +1026,14 @@ void Pipeline::bindTexture(const std::string &name,
                                texture->height)});
 }
 
-#ifdef METAL
+#if defined(METAL) || defined(VULKAN)
 void Pipeline::bindTextureArray(
     const std::vector<std::shared_ptr<Texture>> &textures,
     uint32_t bufferIndex) {
     if (shaderProgram == nullptr || Device::globalInstance == nullptr) {
         return;
     }
+#ifdef METAL
     auto &state = metal::pipelineState(this);
     if (state.textureArgumentBuffer != nullptr &&
         state.textureArgumentBufferIndex == bufferIndex &&
@@ -1067,6 +1071,50 @@ void Pipeline::bindTextureArray(
     }
     state.textureArgumentBufferIndex = bufferIndex;
     state.textureArgumentTextures = textures;
+#else
+    const UniformBindingInfo *binding = nullptr;
+    for (const auto &entry : shaderProgram->uniformBindings) {
+        const auto &candidate = entry.second;
+        if (candidate.binding == bufferIndex && candidate.isSampler &&
+            candidate.size > 1) {
+            binding = &candidate;
+            break;
+        }
+    }
+    if (binding == nullptr) {
+        return;
+    }
+    ensureDescriptorResources();
+    if (binding->set >= descriptorSets.size() ||
+        descriptorSets[binding->set] == VK_NULL_HANDLE) {
+        return;
+    }
+    const uint32_t count = std::min<uint32_t>(
+        binding->size, static_cast<uint32_t>(textures.size()));
+    std::vector<VkDescriptorImageInfo> images(count);
+    for (uint32_t index = 0; index < count; ++index) {
+        auto texture = textures[index] ? textures[index] : getDummyTexture();
+        if (texture->currentLayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &&
+            texture->currentLayout != VK_IMAGE_LAYOUT_GENERAL) {
+            Framebuffer::transitionImageLayout(
+                texture->vkImage, opalTextureFormatToVulkanFormat(texture->format),
+                texture->currentLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                texture->type == TextureType::TextureCubeMap ? 6 : 1);
+            texture->currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+        images[index].sampler = texture->vkSampler;
+        images[index].imageView = texture->vkImageView;
+        images[index].imageLayout = texture->currentLayout;
+    }
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = descriptorSets[binding->set];
+    write.dstBinding = binding->binding;
+    write.descriptorCount = count;
+    write.descriptorType = binding->resourceType;
+    write.pImageInfo = images.data();
+    vkUpdateDescriptorSets(Device::globalDevice, 1, &write, 0, nullptr);
+#endif
 }
 #endif
 

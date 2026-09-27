@@ -362,6 +362,11 @@ std::shared_ptr<Pipeline> Pipeline::create() {
 Pipeline::~Pipeline() {
 #ifdef METAL
     metal::releasePipelineState(this);
+#elif defined(VULKAN)
+    if (computePipeline != VK_NULL_HANDLE &&
+        Device::globalDevice != VK_NULL_HANDLE) {
+        vkDestroyPipeline(Device::globalDevice, computePipeline, nullptr);
+    }
 #endif
 }
 
@@ -619,6 +624,30 @@ void Pipeline::build() {
     (void)this; // Vertex layout applied explicitly per VAO.
 #elif defined(VULKAN)
     this->buildPipelineLayout();
+    if (shaderProgram == nullptr || !shaderProgram->isComputeProgram()) {
+        return;
+    }
+    if (computePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(Device::globalDevice, computePipeline, nullptr);
+        computePipeline = VK_NULL_HANDLE;
+    }
+    auto stages = shaderProgram->getShaderStages();
+    auto stage = std::find_if(
+        stages.begin(), stages.end(), [](const auto &candidate) {
+            return candidate.stage == VK_SHADER_STAGE_COMPUTE_BIT;
+        });
+    if (stage == stages.end()) {
+        throw std::runtime_error("Vulkan compute pipeline has no compute stage");
+    }
+    VkComputePipelineCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    createInfo.stage = *stage;
+    createInfo.layout = pipelineLayout;
+    if (vkCreateComputePipelines(Device::globalDevice, VK_NULL_HANDLE, 1,
+                                 &createInfo, nullptr,
+                                 &computePipeline) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create Vulkan compute pipeline");
+    }
 #elif defined(METAL)
     if (Device::globalInstance == nullptr) {
         throw std::runtime_error("Cannot build Metal pipeline without device");
@@ -1115,8 +1144,11 @@ void Pipeline::bindBuffer(const std::string &name,
             ? bindingInfo->type
             : (info->isStorageBuffer ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
                                      : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
-    VkDeviceSize range = 256;
-    if (bindingInfo != nullptr && bindingInfo->minBufferSize > 0) {
+    VkDeviceSize range = descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+                             ? VK_WHOLE_SIZE
+                             : 256;
+    if (descriptorType != VK_DESCRIPTOR_TYPE_STORAGE_BUFFER &&
+        bindingInfo != nullptr && bindingInfo->minBufferSize > 0) {
         range = bindingInfo->minBufferSize;
     } else if (info->size > 0) {
         range = info->size;
@@ -1418,20 +1450,19 @@ void Pipeline::ensureDescriptorResources() {
     }
 
     std::unordered_map<VkDescriptorType, uint32_t> typeCounts;
-    uint32_t setCount = 0;
+    uint32_t setCount = static_cast<uint32_t>(descriptorSetLayouts.size());
     for (const auto &setPair : descriptorBindingInfo) {
         uint32_t setIdx = setPair.first;
         if (setIdx >= descriptorSetLayouts.size() ||
             descriptorSetLayouts[setIdx] == VK_NULL_HANDLE) {
             continue;
         }
-        setCount++;
         for (const auto &bindingPair : setPair.second) {
             typeCounts[bindingPair.second.type] += bindingPair.second.count;
         }
     }
 
-    if (setCount == 0 || typeCounts.empty()) {
+    if (setCount == 0) {
         return;
     }
 
@@ -1449,7 +1480,6 @@ void Pipeline::ensureDescriptorResources() {
     poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
     poolInfo.pPoolSizes = poolSizes.data();
     poolInfo.maxSets = setCount;
-    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
 
     if (vkCreateDescriptorPool(Device::globalDevice, &poolInfo, nullptr,
                                &descriptorPool) != VK_SUCCESS) {
@@ -1603,12 +1633,13 @@ void Pipeline::bindUniformBufferDescriptor(uint32_t set, uint32_t binding) {
     if (descriptorBufferIt != descriptorBuffers.end() &&
         descriptorBufferIt->second != nullptr &&
         descriptorBufferIt->second->vkBuffer != VK_NULL_HANDLE) {
-        VkDeviceSize range =
-            info->minBufferSize > 0 ? info->minBufferSize : 256;
         VkDescriptorBufferInfo externalBufferInfo{};
         externalBufferInfo.buffer = descriptorBufferIt->second->vkBuffer;
         externalBufferInfo.offset = 0;
-        externalBufferInfo.range = range;
+        externalBufferInfo.range =
+            info->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+                ? VK_WHOLE_SIZE
+                : (info->minBufferSize > 0 ? info->minBufferSize : 256);
 
         VkWriteDescriptorSet externalWrite{};
         externalWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -1647,7 +1678,8 @@ void Pipeline::bindUniformBufferDescriptor(uint32_t set, uint32_t binding) {
     vkUpdateDescriptorSets(Device::globalDevice, 1, &write, 0, nullptr);
 }
 
-void Pipeline::bindDescriptorSets(VkCommandBuffer commandBuffer) {
+void Pipeline::bindDescriptorSets(VkCommandBuffer commandBuffer,
+                                  VkPipelineBindPoint bindPoint) {
     if (descriptorSetLayouts.empty()) {
         return;
     }
@@ -1665,7 +1697,7 @@ void Pipeline::bindDescriptorSets(VkCommandBuffer commandBuffer) {
         if (!setValid) {
             if (!run.empty() && currentStart != UINT32_MAX) {
                 vkCmdBindDescriptorSets(
-                    commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    commandBuffer, bindPoint,
                     pipelineLayout, currentStart,
                     static_cast<uint32_t>(run.size()), run.data(), 0, nullptr);
                 run.clear();
@@ -1681,7 +1713,7 @@ void Pipeline::bindDescriptorSets(VkCommandBuffer commandBuffer) {
     }
 
     if (!run.empty() && currentStart != UINT32_MAX) {
-        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+        vkCmdBindDescriptorSets(commandBuffer, bindPoint,
                                 pipelineLayout, currentStart,
                                 static_cast<uint32_t>(run.size()), run.data(),
                                 0, nullptr);

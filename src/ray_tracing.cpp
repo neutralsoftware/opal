@@ -399,3 +399,396 @@ void opal::CommandBuffer::buildInstanceAccelerationStructure(
 }
 
 #endif
+
+#ifdef VULKAN
+
+namespace {
+
+void createRayBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
+                     VkMemoryPropertyFlags properties, VkBuffer &buffer,
+                     VkDeviceMemory &memory, const void *data = nullptr) {
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = size;
+    bufferInfo.usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(opal::Device::globalDevice, &bufferInfo, nullptr,
+                       &buffer) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create Vulkan ray tracing buffer");
+    }
+    VkMemoryRequirements requirements{};
+    vkGetBufferMemoryRequirements(opal::Device::globalDevice, buffer,
+                                  &requirements);
+    VkMemoryAllocateFlagsInfo flags{};
+    flags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+    flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+    VkMemoryAllocateInfo allocation{};
+    allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocation.pNext = &flags;
+    allocation.allocationSize = requirements.size;
+    allocation.memoryTypeIndex =
+        opal::Device::globalInstance->findMemoryType(
+            requirements.memoryTypeBits, properties);
+    if (vkAllocateMemory(opal::Device::globalDevice, &allocation, nullptr,
+                         &memory) != VK_SUCCESS) {
+        vkDestroyBuffer(opal::Device::globalDevice, buffer, nullptr);
+        buffer = VK_NULL_HANDLE;
+        throw std::runtime_error("Failed to allocate Vulkan ray tracing memory");
+    }
+    if (vkBindBufferMemory(opal::Device::globalDevice, buffer, memory, 0) !=
+        VK_SUCCESS) {
+        vkDestroyBuffer(opal::Device::globalDevice, buffer, nullptr);
+        vkFreeMemory(opal::Device::globalDevice, memory, nullptr);
+        buffer = VK_NULL_HANDLE;
+        memory = VK_NULL_HANDLE;
+        throw std::runtime_error("Failed to bind Vulkan ray tracing memory");
+    }
+    if (data != nullptr) {
+        void *mapped = nullptr;
+        if (vkMapMemory(opal::Device::globalDevice, memory, 0, size, 0,
+                        &mapped) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to map Vulkan ray tracing memory");
+        }
+        std::memcpy(mapped, data, static_cast<size_t>(size));
+        vkUnmapMemory(opal::Device::globalDevice, memory);
+    }
+}
+
+VkDeviceAddress rayBufferAddress(VkBuffer buffer) {
+    VkBufferDeviceAddressInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    info.buffer = buffer;
+    return vkGetBufferDeviceAddress(opal::Device::globalDevice, &info);
+}
+
+void destroyRayBuffer(VkBuffer &buffer, VkDeviceMemory &memory) {
+    if (buffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(opal::Device::globalDevice, buffer, nullptr);
+        buffer = VK_NULL_HANDLE;
+    }
+    if (memory != VK_NULL_HANDLE) {
+        vkFreeMemory(opal::Device::globalDevice, memory, nullptr);
+        memory = VK_NULL_HANDLE;
+    }
+}
+
+}
+
+opal::PrimitiveAccelerationStructure::~PrimitiveAccelerationStructure() {
+    if (blas != VK_NULL_HANDLE) {
+        vkDestroyAccelerationStructureKHR(Device::globalDevice, blas, nullptr);
+    }
+    destroyRayBuffer(accelerationBuffer, accelerationMemory);
+    destroyRayBuffer(scratchBuffer, scratchMemory);
+    for (size_t index = 0; index < vertexBuffers.size(); ++index) {
+        destroyRayBuffer(vertexBuffers[index], vertexMemories[index]);
+    }
+    for (size_t index = 0; index < indexBuffers.size(); ++index) {
+        destroyRayBuffer(indexBuffers[index], indexMemories[index]);
+    }
+}
+
+std::shared_ptr<opal::PrimitiveAccelerationStructure>
+opal::PrimitiveAccelerationStructure::create(
+    const std::vector<PrimitiveVertex> &vertices,
+    const std::vector<uint32_t> &indices) {
+    std::vector<float> positions;
+    positions.reserve(vertices.size() * 3);
+    for (const auto &vertex : vertices) {
+        positions.push_back(vertex.position[0]);
+        positions.push_back(vertex.position[1]);
+        positions.push_back(vertex.position[2]);
+    }
+    return create(positions, indices);
+}
+
+std::shared_ptr<opal::PrimitiveAccelerationStructure>
+opal::PrimitiveAccelerationStructure::create(
+    const std::vector<float> &positions,
+    const std::vector<uint32_t> &indices) {
+    return create(std::vector<std::vector<float>>{positions},
+                  std::vector<std::vector<uint32_t>>{indices});
+}
+
+std::shared_ptr<opal::PrimitiveAccelerationStructure>
+opal::PrimitiveAccelerationStructure::create(
+    const std::vector<std::vector<float>> &positions,
+    const std::vector<std::vector<uint32_t>> &indices) {
+    if (positions.empty() || positions.size() != indices.size()) {
+        return nullptr;
+    }
+    auto result = std::make_shared<PrimitiveAccelerationStructure>();
+    result->vertexBuffers.resize(positions.size(), VK_NULL_HANDLE);
+    result->vertexMemories.resize(positions.size(), VK_NULL_HANDLE);
+    result->indexBuffers.resize(indices.size(), VK_NULL_HANDLE);
+    result->indexMemories.resize(indices.size(), VK_NULL_HANDLE);
+    result->geometries.resize(positions.size());
+    result->ranges.resize(positions.size());
+    std::vector<uint32_t> primitiveCounts(positions.size());
+
+    for (size_t geometryIndex = 0; geometryIndex < positions.size();
+         ++geometryIndex) {
+        const auto &geometryPositions = positions[geometryIndex];
+        const auto &geometryIndices = indices[geometryIndex];
+        if (geometryPositions.size() < 9 || geometryPositions.size() % 3 != 0 ||
+            geometryIndices.size() < 3 || geometryIndices.size() % 3 != 0) {
+            return nullptr;
+        }
+        createRayBuffer(
+            geometryPositions.size() * sizeof(float),
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            result->vertexBuffers[geometryIndex],
+            result->vertexMemories[geometryIndex], geometryPositions.data());
+        createRayBuffer(
+            geometryIndices.size() * sizeof(uint32_t),
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            result->indexBuffers[geometryIndex],
+            result->indexMemories[geometryIndex], geometryIndices.data());
+
+        auto &geometry = result->geometries[geometryIndex];
+        geometry.sType =
+            VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+        geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+        geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+        geometry.geometry.triangles.sType =
+            VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+        geometry.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+        geometry.geometry.triangles.vertexData.deviceAddress =
+            rayBufferAddress(result->vertexBuffers[geometryIndex]);
+        geometry.geometry.triangles.vertexStride = sizeof(float) * 3;
+        geometry.geometry.triangles.maxVertex =
+            static_cast<uint32_t>(geometryPositions.size() / 3 - 1);
+        geometry.geometry.triangles.indexType = VK_INDEX_TYPE_UINT32;
+        geometry.geometry.triangles.indexData.deviceAddress =
+            rayBufferAddress(result->indexBuffers[geometryIndex]);
+        primitiveCounts[geometryIndex] =
+            static_cast<uint32_t>(geometryIndices.size() / 3);
+        result->ranges[geometryIndex].primitiveCount =
+            primitiveCounts[geometryIndex];
+    }
+
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+    buildInfo.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    buildInfo.flags =
+        VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    buildInfo.geometryCount = static_cast<uint32_t>(result->geometries.size());
+    buildInfo.pGeometries = result->geometries.data();
+    VkAccelerationStructureBuildSizesInfoKHR sizes{};
+    sizes.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+    vkGetAccelerationStructureBuildSizesKHR(
+        Device::globalDevice, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+        &buildInfo, primitiveCounts.data(), &sizes);
+    createRayBuffer(
+        sizes.accelerationStructureSize,
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, result->accelerationBuffer,
+        result->accelerationMemory);
+    VkAccelerationStructureCreateInfoKHR createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+    createInfo.buffer = result->accelerationBuffer;
+    createInfo.size = sizes.accelerationStructureSize;
+    createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    if (vkCreateAccelerationStructureKHR(Device::globalDevice, &createInfo,
+                                         nullptr, &result->blas) != VK_SUCCESS) {
+        return nullptr;
+    }
+    createRayBuffer(sizes.buildScratchSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                    result->scratchBuffer, result->scratchMemory);
+    return result;
+}
+
+void opal::CommandBuffer::buildPrimitiveAccelerationStructure(
+    const std::shared_ptr<PrimitiveAccelerationStructure> &blas) {
+    if (blas == nullptr || blas->blas == VK_NULL_HANDLE) {
+        throw std::runtime_error("Vulkan BLAS is unavailable");
+    }
+    beginCommandBufferIfNeeded();
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+    buildInfo.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    buildInfo.flags =
+        VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    buildInfo.dstAccelerationStructure = blas->blas;
+    buildInfo.geometryCount = static_cast<uint32_t>(blas->geometries.size());
+    buildInfo.pGeometries = blas->geometries.data();
+    buildInfo.scratchData.deviceAddress = rayBufferAddress(blas->scratchBuffer);
+    std::vector<const VkAccelerationStructureBuildRangeInfoKHR *> ranges;
+    ranges.reserve(blas->ranges.size());
+    for (const auto &range : blas->ranges) {
+        ranges.push_back(&range);
+    }
+    vkCmdBuildAccelerationStructuresKHR(commandBuffers[currentFrame], 1,
+                                        &buildInfo, ranges.data());
+    blas->isBuilt = true;
+}
+
+opal::InstanceAccelerationStructure::~InstanceAccelerationStructure() {
+    if (tlas != VK_NULL_HANDLE) {
+        vkDestroyAccelerationStructureKHR(Device::globalDevice, tlas, nullptr);
+    }
+    destroyRayBuffer(accelerationBuffer, accelerationMemory);
+    destroyRayBuffer(scratchBuffer, scratchMemory);
+    destroyRayBuffer(instanceVkBuffer, instanceVkMemory);
+}
+
+std::shared_ptr<opal::InstanceAccelerationStructure>
+opal::InstanceAccelerationStructure::create(
+    const std::vector<opal::AccelerationStructureInstance> &instances) {
+    if (instances.empty()) {
+        return nullptr;
+    }
+    auto result = std::make_shared<InstanceAccelerationStructure>();
+    result->instances = instances;
+    result->blasRefs.reserve(instances.size());
+    std::vector<VkAccelerationStructureInstanceKHR> descriptors(instances.size());
+    for (size_t index = 0; index < instances.size(); ++index) {
+        const auto &instance = instances[index];
+        if (instance.blas == nullptr || !instance.blas->isBuilt) {
+            throw std::runtime_error("All BLAS must be built before TLAS");
+        }
+        result->blasRefs.push_back(instance.blas);
+        VkAccelerationStructureDeviceAddressInfoKHR addressInfo{};
+        addressInfo.sType =
+            VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+        addressInfo.accelerationStructure = instance.blas->blas;
+        auto &descriptor = descriptors[index];
+        for (int row = 0; row < 3; ++row) {
+            for (int column = 0; column < 4; ++column) {
+                descriptor.transform.matrix[row][column] =
+                    instance.transform[column][row];
+            }
+        }
+        descriptor.instanceCustomIndex = instance.instanceId;
+        descriptor.mask = instance.mask == 0 ? 0xFF : instance.mask;
+        descriptor.instanceShaderBindingTableRecordOffset = 0;
+        descriptor.flags = instance.cullDisable
+                               ? VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR
+                               : 0;
+        descriptor.accelerationStructureReference =
+            vkGetAccelerationStructureDeviceAddressKHR(Device::globalDevice,
+                                                        &addressInfo);
+    }
+    createRayBuffer(
+        descriptors.size() * sizeof(descriptors[0]),
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        result->instanceVkBuffer, result->instanceVkMemory,
+        descriptors.data());
+    VkAccelerationStructureGeometryKHR geometry{};
+    geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    geometry.geometry.instances.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    geometry.geometry.instances.data.deviceAddress =
+        rayBufferAddress(result->instanceVkBuffer);
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+    buildInfo.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    buildInfo.flags =
+        VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    buildInfo.geometryCount = 1;
+    buildInfo.pGeometries = &geometry;
+    uint32_t primitiveCount = static_cast<uint32_t>(descriptors.size());
+    VkAccelerationStructureBuildSizesInfoKHR sizes{};
+    sizes.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+    vkGetAccelerationStructureBuildSizesKHR(
+        Device::globalDevice, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+        &buildInfo, &primitiveCount, &sizes);
+    createRayBuffer(
+        sizes.accelerationStructureSize,
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, result->accelerationBuffer,
+        result->accelerationMemory);
+    VkAccelerationStructureCreateInfoKHR createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+    createInfo.buffer = result->accelerationBuffer;
+    createInfo.size = sizes.accelerationStructureSize;
+    createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    if (vkCreateAccelerationStructureKHR(Device::globalDevice, &createInfo,
+                                         nullptr, &result->tlas) != VK_SUCCESS) {
+        return nullptr;
+    }
+    createRayBuffer(sizes.buildScratchSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                    result->scratchBuffer, result->scratchMemory);
+    return result;
+}
+
+void opal::CommandBuffer::buildInstanceAccelerationStructure(
+    const std::shared_ptr<InstanceAccelerationStructure> &tlas) {
+    if (tlas == nullptr || tlas->tlas == VK_NULL_HANDLE) {
+        throw std::runtime_error("Vulkan TLAS is unavailable");
+    }
+    beginCommandBufferIfNeeded();
+    VkAccelerationStructureGeometryKHR geometry{};
+    geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    geometry.geometry.instances.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    geometry.geometry.instances.data.deviceAddress =
+        rayBufferAddress(tlas->instanceVkBuffer);
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+    buildInfo.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    buildInfo.flags =
+        VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    buildInfo.dstAccelerationStructure = tlas->tlas;
+    buildInfo.geometryCount = 1;
+    buildInfo.pGeometries = &geometry;
+    buildInfo.scratchData.deviceAddress = rayBufferAddress(tlas->scratchBuffer);
+    VkAccelerationStructureBuildRangeInfoKHR range{};
+    range.primitiveCount = static_cast<uint32_t>(tlas->instances.size());
+    const VkAccelerationStructureBuildRangeInfoKHR *rangePointer = &range;
+    vkCmdBuildAccelerationStructuresKHR(commandBuffers[currentFrame], 1,
+                                        &buildInfo, &rangePointer);
+    tlas->isBuilt = true;
+}
+
+std::shared_ptr<opal::InstanceAccelerationStructure>
+opal::CommandBuffer::buildAccelerationStructures(
+    const std::vector<std::shared_ptr<PrimitiveAccelerationStructure>> &blases,
+    const std::vector<AccelerationStructureInstance> &instances) {
+    if (blases.empty() || instances.empty()) {
+        return nullptr;
+    }
+    for (const auto &blas : blases) {
+        buildPrimitiveAccelerationStructure(blas);
+    }
+    VkMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    vkCmdPipelineBarrier(
+        commandBuffers[currentFrame],
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1,
+        &barrier, 0, nullptr, 0, nullptr);
+    auto tlas = InstanceAccelerationStructure::create(instances);
+    buildInstanceAccelerationStructure(tlas);
+    barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    vkCmdPipelineBarrier(
+        commandBuffers[currentFrame],
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0,
+        nullptr);
+    return tlas;
+}
+
+#endif

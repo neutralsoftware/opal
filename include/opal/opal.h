@@ -496,6 +496,7 @@ struct UniformBindingInfo {
     bool isSampler;
     bool isBuffer;
     bool isStorageBuffer;
+    bool isAccelerationStructure = false;
     bool isCubemap;
     VkDescriptorType resourceType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 };
@@ -523,6 +524,7 @@ class Shader {
     std::string functionName;
 
 #ifdef VULKAN
+    VkPipeline computePipeline = VK_NULL_HANDLE;
     VkShaderModule shaderModule = VK_NULL_HANDLE;
     VkPipelineShaderStageCreateInfo makeShaderStageInfo() const;
 
@@ -659,6 +661,7 @@ struct VertexBinding {
 };
 
 class PrimitiveAccelerationStructure;
+class InstanceAccelerationStructure;
 
 class Pipeline {
   public:
@@ -772,7 +775,7 @@ class Pipeline {
                        int callerId = -1);
     void bindTextureCubemap(const std::string &name, uint textureId, int unit,
                             int callerId = -1);
-#ifdef METAL
+#if defined(METAL) || defined(VULKAN)
     void bindTextureArray(const std::vector<std::shared_ptr<Texture>> &textures,
                           uint32_t bufferIndex);
 #endif
@@ -812,6 +815,7 @@ class Pipeline {
         bool isBuffer = false;
         bool isSampler = false;
         bool isCubemap = false;
+        bool isAccelerationStructure = false;
     };
     std::map<uint32_t, std::map<uint32_t, DescriptorBindingInfoEntry>>
         descriptorBindingInfo;
@@ -825,6 +829,10 @@ class Pipeline {
     };
     std::unordered_map<uint64_t, UniformBufferAllocation> uniformBuffers;
     std::unordered_map<uint64_t, std::shared_ptr<Buffer>> descriptorBuffers;
+    std::unordered_map<uint64_t, std::shared_ptr<PrimitiveAccelerationStructure>>
+        descriptorAccelerationStructures;
+    std::unordered_map<uint64_t, std::shared_ptr<InstanceAccelerationStructure>>
+        descriptorInstanceAccelerationStructures;
 
     static uint64_t makeBindingKey(uint32_t set, uint32_t binding) {
         return (static_cast<uint64_t>(set) << 32) | binding;
@@ -838,7 +846,9 @@ class Pipeline {
 
     void buildDescriptorSets();
     void ensureDescriptorResources();
-    void bindDescriptorSets(VkCommandBuffer commandBuffer);
+    void bindDescriptorSets(VkCommandBuffer commandBuffer,
+                            VkPipelineBindPoint bindPoint =
+                                VK_PIPELINE_BIND_POINT_GRAPHICS);
     void bindUniformBufferDescriptor(uint32_t set, uint32_t binding);
     void bindSamplerDescriptor(uint32_t set, uint32_t binding,
                                std::shared_ptr<Texture> texture);
@@ -1170,7 +1180,7 @@ class ResolveAction {
     bool resolveColor = true;
 };
 
-#ifdef METAL
+#if defined(METAL) || defined(VULKAN)
 struct PrimitiveVertex {
     float position[3];
     float normal[3];
@@ -1199,13 +1209,29 @@ class PrimitiveAccelerationStructure {
     friend class InstanceAccelerationStructure;
     std::shared_ptr<Buffer> scratch;
 
+#ifdef METAL
     MTL::AccelerationStructureDescriptor *blasDescriptor = nullptr;
     MTL::AccelerationStructure *blas = nullptr;
     std::vector<std::shared_ptr<MTL::Buffer>> vertexBuffers;
     std::vector<std::shared_ptr<MTL::Buffer>> indexBuffers;
+#elif defined(VULKAN)
+    VkAccelerationStructureKHR blas = VK_NULL_HANDLE;
+    VkBuffer accelerationBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory accelerationMemory = VK_NULL_HANDLE;
+    VkBuffer scratchBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory scratchMemory = VK_NULL_HANDLE;
+    std::vector<VkBuffer> vertexBuffers;
+    std::vector<VkDeviceMemory> vertexMemories;
+    std::vector<VkBuffer> indexBuffers;
+    std::vector<VkDeviceMemory> indexMemories;
+    std::vector<VkAccelerationStructureGeometryKHR> geometries;
+    std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges;
+#endif
 };
 
+#ifdef METAL
 static inline void writeMetalTransform3x4(const glm::mat4 &M, float out3x4[12]);
+#endif
 
 struct AccelerationStructureInstance {
     std::shared_ptr<PrimitiveAccelerationStructure> blas;
@@ -1226,11 +1252,21 @@ class InstanceAccelerationStructure {
   private:
     std::vector<AccelerationStructureInstance> instances;
     std::shared_ptr<Buffer> instanceBuffer;
+#ifdef METAL
     MTL::InstanceAccelerationStructureDescriptor *tlasDescriptor = nullptr;
     MTL::AccelerationStructure *tlas = nullptr;
-
     std::vector<std::shared_ptr<PrimitiveAccelerationStructure>> blasRefs;
     std::vector<MTL::AccelerationStructure *> blasPtrs;
+#elif defined(VULKAN)
+    VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
+    VkBuffer accelerationBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory accelerationMemory = VK_NULL_HANDLE;
+    VkBuffer scratchBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory scratchMemory = VK_NULL_HANDLE;
+    VkBuffer instanceVkBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory instanceVkMemory = VK_NULL_HANDLE;
+    std::vector<std::shared_ptr<PrimitiveAccelerationStructure>> blasRefs;
+#endif
 
     std::shared_ptr<Buffer> scratch;
 
@@ -1280,7 +1316,7 @@ class CommandBuffer {
 
     int getAndResetDrawCallCount();
 
-#ifdef METAL
+#if defined(METAL) || defined(VULKAN)
     void buildPrimitiveAccelerationStructure(
         const std::shared_ptr<PrimitiveAccelerationStructure> &blas);
 
