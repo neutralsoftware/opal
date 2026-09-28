@@ -10,12 +10,13 @@
 #include "diagnostics.h"
 #include "opal/opal.h"
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <glad/glad.h>
+#include <glm/glm.hpp>
 #include <limits>
 #include <memory>
 #include <stdexcept>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 #ifdef METAL
@@ -23,6 +24,7 @@
 #endif
 #ifdef VULKAN
 #include "vulkan_state.h"
+#include <vulkan/vulkan_core.h>
 #endif
 
 namespace opal {

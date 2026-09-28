@@ -5,3 +5,4 @@ cmake-build-*/
 .cache
 build
 cmake
+clang-tidy.log

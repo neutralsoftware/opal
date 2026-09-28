@@ -12,7 +12,11 @@
 
 #include "opal/opal.h"
 #include "vulkan_state.h"
+#include <cstddef>
+#include <cstdint>
 #include <unordered_map>
+#include <vulkan/vk_platform.h>
+#include <vulkan/vulkan_core.h>
 
 namespace opal::vulkan {
 

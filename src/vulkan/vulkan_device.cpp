@@ -19,8 +19,8 @@
 #include "diagnostics.h"
 #include "opal/opal.h"
 #include "vulkan_state.h"
-#include <SDL3/SDL_vulkan.h>
-#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_beta.h>
+#include <vulkan/vulkan_core.h>
 
 namespace opal::vulkan {
 

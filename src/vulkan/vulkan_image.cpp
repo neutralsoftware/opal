@@ -7,13 +7,15 @@
 // Copyright (c) 2026 Max Van den Eynde
 //
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 #ifdef VULKAN
 #include "diagnostics.h"
 #include "opal/opal.h"
 #include "vulkan_state.h"
-#include <vulkan/vulkan.h>
+#include <SDL3/SDL_video.h>
+#include <vulkan/vulkan_core.h>
 
 namespace opal::vulkan {
 

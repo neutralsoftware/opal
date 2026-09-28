@@ -1,12 +1,13 @@
 #include "diagnostics.h"
 #include <atomic>
 #include <iostream>
+#include <opal/opal.h>
 
 namespace {
 std::atomic<opal::LogCallback> callback = nullptr;
 std::atomic<opal::ResourceCallback> resourceCallback = nullptr;
 std::atomic<opal::DrawCallback> drawCallback = nullptr;
-}
+} // namespace
 
 void opal::setLogCallback(LogCallback value) { callback.store(value); }
 void opal::setResourceCallback(ResourceCallback value) {

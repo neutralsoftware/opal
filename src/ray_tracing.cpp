@@ -7,12 +7,11 @@
  Copyright (c) 2026 Max Van den Eynde
 */
 
-#include "diagnostics.h"
-#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <opal/opal.h>
+#include <stddef.h>
 #ifdef METAL
 
 #include "Metal/Metal.hpp"
@@ -401,11 +400,10 @@ void opal::CommandBuffer::buildInstanceAccelerationStructure(
 
 #elif defined(VULKAN)
 
+#include "diagnostics.h"
 #include "vulkan_state.h"
-#include <algorithm>
-#include <array>
 #include <stdexcept>
-#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_core.h>
 
 namespace {
 

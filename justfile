@@ -19,3 +19,15 @@ clangd backend="AUTO":
         -DOPAL_BACKEND={{backend}} \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
     ln -sf build/compile_commands.json compile_commands.json
+
+clang-tidy:
+    find include src atlas aurora bezel editor finewave graphite hydra opal photon \
+        \( -path '*/extern/*' -o -path '*/third-party/*' -o -path '*/build/*' \) -prune -o \
+        \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \) \
+        -print0 | xargs -0 -P 1 -n1 \
+        clang-tidy \
+        -p build \
+        --extra-arg=-isystem$(xcrun --show-sdk-path)/usr/include \
+        --extra-arg=-isystem/opt/homebrew/opt/llvm/include/c++/v1 \
+        -checks='-*,clang-diagnostic-*,portability-*,misc-include-cleaner' \
+        2>&1 | tee clang-tidy.log

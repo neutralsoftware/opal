@@ -12,8 +12,9 @@
 #include "opal/opal.h"
 #include "vulkan_state.h"
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
-#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_core.h>
 
 namespace opal::vulkan {
 VkBlendFactor blenderFuncToVk(BlendFunc func) {

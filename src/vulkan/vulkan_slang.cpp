@@ -14,6 +14,7 @@
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <opal/opal.h>
 #include <string>
 #include <utility>
 #include <vector>
@@ -22,7 +23,9 @@
 #include "vulkan_state.h"
 #include <slang-com-ptr.h>
 #include <slang.h>
+#include <spirv_cross/spirv.hpp>
 #include <spirv_cross/spirv_cross.hpp>
+#include <vulkan/vulkan_core.h>
 
 namespace opal::vulkan {
 SlangCompilerState::SlangCompilerState() {

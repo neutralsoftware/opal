@@ -8,9 +8,7 @@
 //
 
 #include "diagnostics.h"
-#include "windowing.h"
 #include <algorithm>
-#include <array>
 #include <cstdint>
 #include <cstring>
 #include <glad/glad.h>
@@ -30,6 +28,7 @@
 
 #ifdef VULKAN
 #include "vulkan_state.h"
+#include <vulkan/vulkan_core.h>
 #endif
 
 namespace opal {

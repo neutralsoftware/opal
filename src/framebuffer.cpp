@@ -7,11 +7,12 @@
 // Copyright (c) 2025 maxvdec
 //
 
-#include "diagnostics.h"
 #include "opal/opal.h"
 #include <algorithm>
+#include <cstddef>
 #include <glad/glad.h>
 #include <memory>
+#include <stdexcept>
 #include <utility>
 #ifdef METAL
 #include "metal_state.h"
@@ -19,6 +20,7 @@
 
 #ifdef VULKAN
 #include "vulkan_state.h"
+#include <vulkan/vulkan_core.h>
 #endif
 
 namespace opal {

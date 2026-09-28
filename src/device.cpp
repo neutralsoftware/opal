@@ -9,10 +9,11 @@
 
 #include "diagnostics.h"
 #include "opal/opal.h"
-#include "windowing.h"
+#include <SDL3/SDL_init.h>
+#include <SDL3/SDL_video.h>
 #include <algorithm>
-#include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <glad/glad.h>
 #include <memory>
@@ -25,6 +26,7 @@
 #ifdef VULKAN
 #include "vulkan_state.h"
 #include <SDL3/SDL_vulkan.h>
+#include <vulkan/vulkan_core.h>
 #endif
 
 namespace opal {

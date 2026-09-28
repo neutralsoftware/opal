@@ -17,6 +17,7 @@
 #include <functional>
 #include <glad/glad.h>
 #include <memory>
+#include <string.h>
 #include <string>
 #include <utility>
 #include <vector>
@@ -25,6 +26,7 @@
 #endif
 #ifdef VULKAN
 #include "vulkan_state.h"
+#include <vulkan/vulkan_core.h>
 #endif
 
 namespace opal {

@@ -8,6 +8,7 @@
 //
 
 #include "diagnostics.h"
+#include <cstdint>
 #include <cstring>
 #include <glad/glad.h>
 #include <memory>
@@ -18,7 +19,7 @@
 #ifdef METAL
 #include "metal_state.h"
 #elif VULKAN
-#include "vulkan/vulkan.h"
+#include "vulkan/vulkan_core.h"
 #include "vulkan_state.h"
 #endif
 

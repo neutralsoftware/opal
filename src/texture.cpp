@@ -14,9 +14,9 @@
 #include <cstdint>
 #include <cstring>
 #include <glad/glad.h>
+#include <glm/glm.hpp>
 #include <memory>
 #include <stdexcept>
-#include <sys/types.h>
 #include <vector>
 #ifdef METAL
 #include "metal_state.h"
@@ -24,7 +24,7 @@
 
 #ifdef VULKAN
 #include "vulkan_state.h"
-#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_core.h>
 #endif
 
 namespace opal {
