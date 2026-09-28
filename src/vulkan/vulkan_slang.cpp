@@ -156,8 +156,7 @@ std::vector<uint32_t> compileSlangToSPIRV(const std::string &source,
 std::vector<ShaderBinding> reflectShaderBindings(ShaderState &state,
                                                  ProgramState &programState) {
     if (state.spirv.empty()) {
-        throw std::runtime_error(
-            "Cannot reflect bindings from empty SPIR-V");
+        throw std::runtime_error("Cannot reflect bindings from empty SPIR-V");
     }
 
     spirv_cross::Compiler compiler(state.spirv);
@@ -202,19 +201,17 @@ std::vector<ShaderBinding> reflectShaderBindings(ShaderState &state,
     auto addResources = [&](const auto &reflectedResources,
                             ShaderResourceType type) {
         for (const auto &resource : reflectedResources) {
-            if (!compiler.has_decoration(resource.id,
-                                         spv::DecorationBinding)) {
+            if (!compiler.has_decoration(resource.id, spv::DecorationBinding)) {
                 throw std::runtime_error(
                     "Reflected Vulkan resource has no binding: " +
                     resourceName(resource));
             }
 
             ShaderBinding binding{};
-            binding.set = compiler.has_decoration(
-                              resource.id, spv::DecorationDescriptorSet)
+            binding.set = compiler.has_decoration(resource.id,
+                                                  spv::DecorationDescriptorSet)
                               ? compiler.get_decoration(
-                                    resource.id,
-                                    spv::DecorationDescriptorSet)
+                                    resource.id, spv::DecorationDescriptorSet)
                               : 0;
             binding.binding =
                 compiler.get_decoration(resource.id, spv::DecorationBinding);
@@ -223,12 +220,12 @@ std::vector<ShaderBinding> reflectShaderBindings(ShaderState &state,
             binding.count = descriptorCount(resource);
             binding.stages = state.stage;
 
-            auto existing = std::find_if(
-                bindings.begin(), bindings.end(),
-                [&](const ShaderBinding &other) {
-                    return other.set == binding.set &&
-                           other.binding == binding.binding;
-                });
+            auto existing =
+                std::find_if(bindings.begin(), bindings.end(),
+                             [&](const ShaderBinding &other) {
+                                 return other.set == binding.set &&
+                                        other.binding == binding.binding;
+                             });
             if (existing == bindings.end()) {
                 bindings.push_back(std::move(binding));
                 continue;
@@ -246,22 +243,22 @@ std::vector<ShaderBinding> reflectShaderBindings(ShaderState &state,
         }
     };
 
-    addResources(resources.uniform_buffers,
-                 ShaderResourceType::UniformBuffer);
-    addResources(resources.storage_buffers,
-                 ShaderResourceType::StorageBuffer);
+    addResources(resources.uniform_buffers, ShaderResourceType::UniformBuffer);
+    addResources(resources.storage_buffers, ShaderResourceType::StorageBuffer);
     addResources(resources.sampled_images,
                  ShaderResourceType::CombinedImageSampler);
     addResources(resources.separate_images, ShaderResourceType::SampledImage);
     addResources(resources.separate_samplers, ShaderResourceType::Sampler);
     addResources(resources.storage_images, ShaderResourceType::StorageImage);
+    addResources(resources.acceleration_structures,
+                 ShaderResourceType::AccelerationStructure);
 
     for (const auto &resource : resources.uniform_buffers) {
-        uint32_t set = compiler.has_decoration(
-                           resource.id, spv::DecorationDescriptorSet)
-                           ? compiler.get_decoration(
-                                 resource.id, spv::DecorationDescriptorSet)
-                           : 0;
+        uint32_t set =
+            compiler.has_decoration(resource.id, spv::DecorationDescriptorSet)
+                ? compiler.get_decoration(resource.id,
+                                          spv::DecorationDescriptorSet)
+                : 0;
         uint32_t binding =
             compiler.get_decoration(resource.id, spv::DecorationBinding);
         const auto &blockType = compiler.get_type(resource.base_type_id);
@@ -398,17 +395,17 @@ std::vector<ShaderBinding> reflectShaderBindings(ShaderState &state,
         for (uint32_t index = 0; index < blockType.member_types.size();
              ++index) {
             UniformMember member{};
-            member.name = compiler.get_member_name(resource.base_type_id,
-                                                   index);
+            member.name =
+                compiler.get_member_name(resource.base_type_id, index);
             if (member.name.empty()) {
                 member.name = block.name + "." + std::to_string(index);
             }
             member.set = set;
             member.binding = binding;
-            member.offset = compiler.type_struct_member_offset(blockType,
-                                                               index);
-            member.size = compiler.get_declared_struct_member_size(blockType,
-                                                                   index);
+            member.offset =
+                compiler.type_struct_member_offset(blockType, index);
+            member.size =
+                compiler.get_declared_struct_member_size(blockType, index);
             block.members.push_back(member);
         }
 
@@ -416,8 +413,7 @@ std::vector<ShaderBinding> reflectShaderBindings(ShaderState &state,
             programState.uniformBlocks.begin(),
             programState.uniformBlocks.end(),
             [&](const UniformBlockReflection &other) {
-                return other.set == block.set &&
-                       other.binding == block.binding;
+                return other.set == block.set && other.binding == block.binding;
             });
         if (existingBlock == programState.uniformBlocks.end()) {
             programState.uniformBlocks.push_back(std::move(block));
@@ -446,10 +442,6 @@ std::vector<ShaderBinding> reflectShaderBindings(ShaderState &state,
     if (!resources.subpass_inputs.empty()) {
         throw std::runtime_error(
             "Vulkan input-attachment reflection is not supported");
-    }
-    if (!resources.acceleration_structures.empty()) {
-        throw std::runtime_error(
-            "Vulkan acceleration-structure reflection is not supported");
     }
     if (!resources.atomic_counters.empty()) {
         throw std::runtime_error(
@@ -485,6 +477,9 @@ VkDescriptorType descriptorTypeToVk(ShaderResourceType type) {
 
     case ShaderResourceType::StorageImage:
         return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+
+    case ShaderResourceType::AccelerationStructure:
+        return VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     }
 
     throw std::runtime_error("Unsupported Vulkan shader resource type");

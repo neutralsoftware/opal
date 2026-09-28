@@ -346,7 +346,13 @@ enum class ShaderType {
     Geometry,
     TessellationControl,
     TessellationEvaluation,
-    Compute
+    Compute,
+    RayGeneration,
+    Miss,
+    ClosestHit,
+    AnyHit,
+    Intersection,
+    Callable
 };
 
 class Shader {
@@ -395,6 +401,7 @@ class ShaderProgram {
     uint programID;
     std::vector<std::shared_ptr<Shader>> attachedShaders;
     bool isComputeProgram() const { return computeProgram; }
+    bool isRayTracingProgram() const { return rayTracingProgram; }
 
 #if defined(METAL) || defined(VULKAN)
     static int currentId;
@@ -402,6 +409,7 @@ class ShaderProgram {
 
   private:
     bool computeProgram = false;
+    bool rayTracingProgram = false;
     friend class Shader;
     friend class Pipeline;
     friend class CommandBuffer;
@@ -970,8 +978,53 @@ class InstanceAccelerationStructure {
 };
 #elif VULKAN
 
-class PrimitiveAccelerationStructure {};
-class InstanceAccelerationStructure {};
+class PrimitiveAccelerationStructure {
+  public:
+    ~PrimitiveAccelerationStructure();
+    static std::shared_ptr<PrimitiveAccelerationStructure>
+    create(const std::vector<PrimitiveVertex> &vertices,
+           const std::vector<uint32_t> &indices);
+    static std::shared_ptr<PrimitiveAccelerationStructure>
+    create(const std::vector<float> &positions,
+           const std::vector<uint32_t> &indices);
+
+    bool isBuilt = false;
+    uint64_t nativeHandle() const { return accelerationStructure; }
+
+  private:
+    friend class CommandBuffer;
+    friend class InstanceAccelerationStructure;
+    uint64_t accelerationStructure = 0;
+    uint64_t accelerationBuffer = 0;
+    uint64_t accelerationMemory = 0;
+    uint64_t geometryBuffer = 0;
+    uint64_t indexBuffer = 0;
+    uint64_t scratchBuffer = 0;
+    uint64_t scratchMemory = 0;
+    std::shared_ptr<Buffer> vertexData;
+    std::shared_ptr<Buffer> indexData;
+};
+
+class InstanceAccelerationStructure {
+  public:
+    ~InstanceAccelerationStructure();
+    static std::shared_ptr<InstanceAccelerationStructure>
+    create(const std::vector<opal::AccelerationStructureInstance> &instances);
+
+    bool isBuilt = false;
+    uint64_t nativeHandle() const { return accelerationStructure; }
+
+  private:
+    friend class CommandBuffer;
+    uint64_t accelerationStructure = 0;
+    uint64_t accelerationBuffer = 0;
+    uint64_t accelerationMemory = 0;
+    uint64_t instanceBuffer = 0;
+    uint64_t scratchBuffer = 0;
+    uint64_t scratchMemory = 0;
+    std::shared_ptr<Buffer> instanceData;
+    std::vector<std::shared_ptr<PrimitiveAccelerationStructure>> blases;
+};
 
 #endif
 
@@ -1007,6 +1060,7 @@ class CommandBuffer {
     void drawPatches(uint vertexCount, uint firstVertex = 0, int objectId = -1);
     void dispatch(uint threadCountX, uint threadCountY = 1,
                   uint threadCountZ = 1);
+    void dispatchRays(uint width, uint height = 1, uint depth = 1);
     void computeBarrier();
     void generateMipmaps(const std::shared_ptr<Texture> &texture);
     void performResolve(const std::shared_ptr<ResolveAction> &resolveAction);
@@ -1030,6 +1084,22 @@ class CommandBuffer {
     void bindPrimitiveAccelerationStructure(
         const std::shared_ptr<PrimitiveAccelerationStructure> &blas,
         uint32_t binding);
+
+    void buildInstanceAccelerationStructure(
+        const std::shared_ptr<InstanceAccelerationStructure> &tlas);
+
+    void bindInstanceAccelerationStructure(
+        const std::shared_ptr<InstanceAccelerationStructure> &tlas,
+        uint32_t binding);
+
+#elif VULKAN
+    void buildPrimitiveAccelerationStructure(
+        const std::shared_ptr<PrimitiveAccelerationStructure> &blas);
+
+    std::shared_ptr<InstanceAccelerationStructure> buildAccelerationStructures(
+        const std::vector<std::shared_ptr<PrimitiveAccelerationStructure>>
+            &blases,
+        const std::vector<AccelerationStructureInstance> &instances);
 
     void buildInstanceAccelerationStructure(
         const std::shared_ptr<InstanceAccelerationStructure> &tlas);

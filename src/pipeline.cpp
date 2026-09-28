@@ -778,6 +778,11 @@ void Pipeline::build() {
         vkDestroyPipeline(device.device, state.computePipeline, nullptr);
         state.computePipeline = VK_NULL_HANDLE;
     }
+    if (state.rayTracingPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device.device, state.rayTracingPipeline, nullptr);
+        state.rayTracingPipeline = VK_NULL_HANDLE;
+    }
+    state.shaderBindingTable.reset();
     if (state.descriptorPool != VK_NULL_HANDLE) {
         vkDestroyDescriptorPool(device.device, state.descriptorPool, nullptr);
         state.descriptorPool = VK_NULL_HANDLE;
@@ -787,6 +792,7 @@ void Pipeline::build() {
     state.descriptorsDirty = true;
     state.boundBuffers.clear();
     state.boundImages.clear();
+    state.boundAccelerationStructures.clear();
     state.uniformBlocks.clear();
 
     state.vertexBindings.clear();
@@ -822,6 +828,12 @@ void Pipeline::build() {
         state.boundBuffers[key] = {
             .buffer = buffer, .offset = 0, .range = reflectedBlock.size};
         state.uniformBlocks.emplace(key, std::move(block));
+    }
+
+    if (shaderProgram->isRayTracingProgram()) {
+        vulkan::createOrGetRayTracingPipeline(this);
+        state.built = true;
+        return;
     }
 
     if (shaderProgram->isComputeProgram()) {

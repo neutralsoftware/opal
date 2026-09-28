@@ -86,12 +86,17 @@ struct PhysicalDeviceInfo {
 
     VkPhysicalDeviceProperties properties{};
     VkPhysicalDeviceFeatures2 features{};
+    VkPhysicalDeviceVulkan12Features features12{};
     VkPhysicalDeviceVulkan13Features features13{};
     VkPhysicalDevicePortabilitySubsetFeaturesKHR portabilityFeatures{};
     VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT divisorFeatures{};
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR
+        accelerationStructureFeatures{};
+    VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingPipelineFeatures{};
 
     bool hasPortabilitySubset = false;
     bool hasVertexAttributeDivisor = false;
+    bool hasRayTracing = false;
 
     DeviceQueueFamilies queueFamilies{};
 };
@@ -205,7 +210,8 @@ enum class ShaderResourceType {
     CombinedImageSampler,
     SampledImage,
     Sampler,
-    StorageImage
+    StorageImage,
+    AccelerationStructure
 };
 
 struct ShaderBinding {
@@ -373,6 +379,18 @@ struct PipelineState {
     std::vector<VkDynamicState> dynamicStates;
 
     VkPipeline computePipeline = VK_NULL_HANDLE;
+    VkPipeline rayTracingPipeline = VK_NULL_HANDLE;
+    std::vector<VkRayTracingShaderGroupCreateInfoKHR> rayTracingGroups;
+    std::shared_ptr<Buffer> shaderBindingTable;
+    uint32_t rayGenerationGroup = 0;
+    uint32_t missGroupFirst = 0;
+    uint32_t missGroupCount = 0;
+    uint32_t hitGroupFirst = 0;
+    uint32_t hitGroupCount = 0;
+    VkStridedDeviceAddressRegionKHR raygenRegion{};
+    VkStridedDeviceAddressRegionKHR missRegion{};
+    VkStridedDeviceAddressRegionKHR hitRegion{};
+    VkStridedDeviceAddressRegionKHR callableRegion{};
 
     std::unordered_map<RenderTargetSignature, VkPipeline,
                        RenderTargetSignatureHash>
@@ -383,6 +401,8 @@ struct PipelineState {
     std::unordered_map<uint64_t, BoundBufferResource> boundBuffers;
 
     std::unordered_map<uint64_t, BoundImageResource> boundImages;
+    std::unordered_map<uint64_t, std::shared_ptr<InstanceAccelerationStructure>>
+        boundAccelerationStructures;
 
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> descriptorSets;
@@ -398,6 +418,7 @@ struct BufferState {
     VkDeviceMemory memory = VK_NULL_HANDLE;
 
     VkDeviceSize size = 0;
+    VkDeviceAddress deviceAddress = 0;
 
     VkBufferUsageFlags usageFlags = 0;
     VkMemoryPropertyFlags memoryProperties = 0;
@@ -501,6 +522,7 @@ VkVertexInputRate vertexBindingRateToVk(VertexBindingInputRate rate);
 
 VkPipeline createOrGetGraphicsPipeline(Pipeline *pipeline,
                                        const RenderTargetSignature &target);
+VkPipeline createOrGetRayTracingPipeline(Pipeline *pipeline);
 void bindPipeline(CommandBuffer *commandBuffer, Pipeline *pipeline,
                   const RenderTargetSignature &target, VkExtent2D renderExtent);
 
@@ -527,6 +549,22 @@ VkExtent2D getRenderExtent(const std::shared_ptr<Framebuffer> &framebuffer,
 void bindVulkanDrawingState(CommandBuffer *commandBuffer,
                             const std::shared_ptr<DrawingState> &drawingState,
                             const std::shared_ptr<Pipeline> &pipeline);
+
+template <typename T> static T vulkanHandleFromUint64(uint64_t value) {
+    if constexpr (std::is_pointer_v<T>) {
+        return reinterpret_cast<T>(static_cast<uintptr_t>(value));
+    } else {
+        return static_cast<T>(value);
+    }
+}
+
+template <typename T> static uint64_t vulkanHandleToUint64(T handle) {
+    if constexpr (std::is_pointer_v<T>) {
+        return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(handle));
+    } else {
+        return static_cast<uint64_t>(handle);
+    }
+}
 
 } // namespace opal::vulkan
 

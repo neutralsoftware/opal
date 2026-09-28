@@ -7,6 +7,7 @@
  Copyright (c) 2026 Max Van den Eynde
 */
 
+#include "diagnostics.h"
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -396,6 +397,423 @@ void opal::CommandBuffer::buildInstanceAccelerationStructure(
     state.pendingResources.emplace_back(tlas->instanceBuffer);
     tlas->scratch.reset();
     tlas->instanceBuffer.reset();
+}
+
+#elif defined(VULKAN)
+
+#include "vulkan_state.h"
+#include <algorithm>
+#include <array>
+#include <stdexcept>
+#include <vulkan/vulkan.h>
+
+namespace {
+
+using namespace opal;
+
+void createAccelerationBuffer(VkDevice device, VkPhysicalDevice physicalDevice,
+                              VkDeviceSize size, VkBuffer &buffer,
+                              VkDeviceMemory &memory) {
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = size;
+    bufferInfo.usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+                       VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    VULKAN_GUARD(vkCreateBuffer(device, &bufferInfo, nullptr, &buffer),
+                 "Failed to create acceleration-structure buffer");
+
+    VkMemoryRequirements requirements{};
+    vkGetBufferMemoryRequirements(device, buffer, &requirements);
+    VkMemoryAllocateFlagsInfo flags{};
+    flags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+    flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+    VkMemoryAllocateInfo allocation{};
+    allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocation.pNext = &flags;
+    allocation.allocationSize = requirements.size;
+    allocation.memoryTypeIndex =
+        vulkan::findMemoryType(physicalDevice, requirements.memoryTypeBits,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    VULKAN_GUARD(vkAllocateMemory(device, &allocation, nullptr, &memory),
+                 "Failed to allocate acceleration-structure memory");
+    VULKAN_GUARD(vkBindBufferMemory(device, buffer, memory, 0),
+                 "Failed to bind acceleration-structure memory");
+}
+
+VkDeviceAddress bufferAddress(VkDevice device, VkBuffer buffer) {
+    VkBufferDeviceAddressInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    info.buffer = buffer;
+    return vkGetBufferDeviceAddress(device, &info);
+}
+
+void destroyAccelerationBuffer(VkDevice device, uint64_t bufferValue,
+                               uint64_t memoryValue) {
+    auto buffer = vulkan::vulkanHandleFromUint64<VkBuffer>(bufferValue);
+    auto memory = vulkan::vulkanHandleFromUint64<VkDeviceMemory>(memoryValue);
+    if (buffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device, buffer, nullptr);
+    }
+    if (memory != VK_NULL_HANDLE) {
+        vkFreeMemory(device, memory, nullptr);
+    }
+}
+
+} // namespace
+
+opal::PrimitiveAccelerationStructure::~PrimitiveAccelerationStructure() {
+    if (Device::globalInstance == nullptr) {
+        return;
+    }
+    auto &device = vulkan::deviceState(Device::globalInstance);
+    if (accelerationStructure != 0) {
+        vkDestroyAccelerationStructureKHR(
+            device.device,
+            vulkan::vulkanHandleFromUint64<VkAccelerationStructureKHR>(
+                accelerationStructure),
+            nullptr);
+    }
+    destroyAccelerationBuffer(device.device, scratchBuffer, scratchMemory);
+    destroyAccelerationBuffer(device.device, accelerationBuffer,
+                              accelerationMemory);
+}
+
+std::shared_ptr<opal::PrimitiveAccelerationStructure>
+opal::PrimitiveAccelerationStructure::create(
+    const std::vector<PrimitiveVertex> &vertices,
+    const std::vector<uint32_t> &indices) {
+    std::vector<float> positions;
+    positions.reserve(vertices.size() * 3);
+    for (const auto &vertex : vertices) {
+        positions.insert(positions.end(), vertex.position, vertex.position + 3);
+    }
+    return create(positions, indices);
+}
+
+std::shared_ptr<opal::PrimitiveAccelerationStructure>
+opal::PrimitiveAccelerationStructure::create(
+    const std::vector<float> &positions, const std::vector<uint32_t> &indices) {
+    if (positions.size() < 9 || positions.size() % 3 != 0 ||
+        indices.size() < 3 || indices.size() % 3 != 0) {
+        return nullptr;
+    }
+    if (Device::globalInstance == nullptr) {
+        throw std::runtime_error("Cannot create BLAS without a Vulkan device");
+    }
+
+    auto result = std::make_shared<PrimitiveAccelerationStructure>();
+    result->vertexData =
+        Buffer::create(BufferUsage::GeneralPurpose,
+                       positions.size() * sizeof(float), positions.data());
+    result->indexData =
+        Buffer::create(BufferUsage::GeneralPurpose,
+                       indices.size() * sizeof(uint32_t), indices.data());
+    auto &device = vulkan::deviceState(Device::globalInstance);
+    auto &vertexState = vulkan::bufferState(result->vertexData.get());
+    auto &indexState = vulkan::bufferState(result->indexData.get());
+
+    VkAccelerationStructureGeometryTrianglesDataKHR triangles{};
+    triangles.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+    triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+    triangles.vertexData.deviceAddress = vertexState.deviceAddress;
+    triangles.vertexStride = sizeof(float) * 3;
+    triangles.maxVertex = static_cast<uint32_t>(positions.size() / 3 - 1);
+    triangles.indexType = VK_INDEX_TYPE_UINT32;
+    triangles.indexData.deviceAddress = indexState.deviceAddress;
+
+    VkAccelerationStructureGeometryKHR geometry{};
+    geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+    geometry.geometry.triangles = triangles;
+    geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+    buildInfo.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    buildInfo.geometryCount = 1;
+    buildInfo.pGeometries = &geometry;
+    uint32_t primitiveCount = static_cast<uint32_t>(indices.size() / 3);
+    VkAccelerationStructureBuildSizesInfoKHR sizes{};
+    sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+    vkGetAccelerationStructureBuildSizesKHR(
+        device.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+        &buildInfo, &primitiveCount, &sizes);
+
+    VkBuffer accelerationBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory accelerationMemory = VK_NULL_HANDLE;
+    createAccelerationBuffer(device.device, device.physicalDeviceInfo.device,
+                             sizes.accelerationStructureSize,
+                             accelerationBuffer, accelerationMemory);
+    VkAccelerationStructureCreateInfoKHR accelerationInfo{};
+    accelerationInfo.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+    accelerationInfo.buffer = accelerationBuffer;
+    accelerationInfo.size = sizes.accelerationStructureSize;
+    accelerationInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    VkAccelerationStructureKHR accelerationStructure = VK_NULL_HANDLE;
+    VULKAN_GUARD(vkCreateAccelerationStructureKHR(device.device,
+                                                  &accelerationInfo, nullptr,
+                                                  &accelerationStructure),
+                 "Failed to create BLAS");
+
+    VkBuffer scratchBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory scratchMemory = VK_NULL_HANDLE;
+    createAccelerationBuffer(device.device, device.physicalDeviceInfo.device,
+                             sizes.buildScratchSize, scratchBuffer,
+                             scratchMemory);
+    result->accelerationStructure =
+        vulkan::vulkanHandleToUint64(accelerationStructure);
+    result->accelerationBuffer =
+        vulkan::vulkanHandleToUint64(accelerationBuffer);
+    result->accelerationMemory =
+        vulkan::vulkanHandleToUint64(accelerationMemory);
+    result->scratchBuffer = vulkan::vulkanHandleToUint64(scratchBuffer);
+    result->scratchMemory = vulkan::vulkanHandleToUint64(scratchMemory);
+    result->geometryBuffer = vulkan::vulkanHandleToUint64(vertexState.buffer);
+    result->indexBuffer = vulkan::vulkanHandleToUint64(indexState.buffer);
+    return result;
+}
+
+void opal::CommandBuffer::buildPrimitiveAccelerationStructure(
+    const std::shared_ptr<PrimitiveAccelerationStructure> &blas) {
+    if (blas == nullptr || blas->vertexData == nullptr ||
+        blas->indexData == nullptr) {
+        throw std::runtime_error("Invalid Vulkan BLAS");
+    }
+    auto &device = vulkan::deviceState(Device::globalInstance);
+    auto &state = vulkan::commandBufferState(this);
+    if (!state.recording || state.commandBuffer == VK_NULL_HANDLE) {
+        throw std::runtime_error(
+            "BLAS build requires recording Vulkan commands");
+    }
+    auto &vertexState = vulkan::bufferState(blas->vertexData.get());
+    auto &indexState = vulkan::bufferState(blas->indexData.get());
+    VkAccelerationStructureGeometryTrianglesDataKHR triangles{};
+    triangles.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+    triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+    triangles.vertexData.deviceAddress = vertexState.deviceAddress;
+    triangles.vertexStride = sizeof(float) * 3;
+    triangles.maxVertex =
+        static_cast<uint32_t>(vertexState.size / sizeof(float) / 3 - 1);
+    triangles.indexType = VK_INDEX_TYPE_UINT32;
+    triangles.indexData.deviceAddress = indexState.deviceAddress;
+    VkAccelerationStructureGeometryKHR geometry{};
+    geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+    geometry.geometry.triangles = triangles;
+    geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+    buildInfo.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    buildInfo.dstAccelerationStructure =
+        vulkan::vulkanHandleFromUint64<VkAccelerationStructureKHR>(
+            blas->accelerationStructure);
+    buildInfo.scratchData.deviceAddress = bufferAddress(
+        device.device,
+        vulkan::vulkanHandleFromUint64<VkBuffer>(blas->scratchBuffer));
+    buildInfo.geometryCount = 1;
+    buildInfo.pGeometries = &geometry;
+    VkAccelerationStructureBuildRangeInfoKHR range{};
+    range.primitiveCount =
+        static_cast<uint32_t>(indexState.size / sizeof(uint32_t) / 3);
+    const VkAccelerationStructureBuildRangeInfoKHR *ranges[] = {&range};
+    vkCmdBuildAccelerationStructuresKHR(state.commandBuffer, 1, &buildInfo,
+                                        ranges);
+    blas->isBuilt = true;
+}
+
+opal::InstanceAccelerationStructure::~InstanceAccelerationStructure() {
+    if (Device::globalInstance == nullptr) {
+        return;
+    }
+    auto &device = vulkan::deviceState(Device::globalInstance);
+    if (accelerationStructure != 0) {
+        vkDestroyAccelerationStructureKHR(
+            device.device,
+            vulkan::vulkanHandleFromUint64<VkAccelerationStructureKHR>(
+                accelerationStructure),
+            nullptr);
+    }
+    destroyAccelerationBuffer(device.device, scratchBuffer, scratchMemory);
+    destroyAccelerationBuffer(device.device, accelerationBuffer,
+                              accelerationMemory);
+}
+
+std::shared_ptr<opal::InstanceAccelerationStructure>
+opal::InstanceAccelerationStructure::create(
+    const std::vector<opal::AccelerationStructureInstance> &instances) {
+    if (instances.empty() || Device::globalInstance == nullptr) {
+        return nullptr;
+    }
+    auto result = std::make_shared<InstanceAccelerationStructure>();
+    std::vector<VkAccelerationStructureInstanceKHR> descriptors(
+        instances.size());
+    result->blases.reserve(instances.size());
+    for (size_t index = 0; index < instances.size(); ++index) {
+        const auto &instance = instances[index];
+        if (instance.blas == nullptr || !instance.blas->isBuilt) {
+            throw std::runtime_error(
+                "All Vulkan BLAS must be built before TLAS creation");
+        }
+        result->blases.push_back(instance.blas);
+        auto &descriptor = descriptors[index];
+        std::memset(&descriptor, 0, sizeof(descriptor));
+        for (uint32_t row = 0; row < 3; ++row) {
+            for (uint32_t column = 0; column < 4; ++column) {
+                descriptor.transform.matrix[row][column] =
+                    instance.transform[column][row];
+            }
+        }
+        descriptor.instanceCustomIndex = instance.instanceId & 0x00FFFFFFu;
+        descriptor.mask = instance.mask ? instance.mask : 0xFF;
+        descriptor.instanceShaderBindingTableRecordOffset = 0;
+        descriptor.flags =
+            instance.cullDisable
+                ? VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR
+                : 0;
+        auto &device = vulkan::deviceState(Device::globalInstance);
+        VkAccelerationStructureDeviceAddressInfoKHR addressInfo{};
+        addressInfo.sType =
+            VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+        addressInfo.accelerationStructure =
+            vulkan::vulkanHandleFromUint64<VkAccelerationStructureKHR>(
+                instance.blas->nativeHandle());
+        descriptor.accelerationStructureReference =
+            vkGetAccelerationStructureDeviceAddressKHR(device.device,
+                                                       &addressInfo);
+    }
+    result->instanceData = Buffer::create(
+        BufferUsage::GeneralPurpose,
+        descriptors.size() * sizeof(VkAccelerationStructureInstanceKHR),
+        descriptors.data());
+
+    auto &device = vulkan::deviceState(Device::globalInstance);
+    auto &instanceState = vulkan::bufferState(result->instanceData.get());
+    VkAccelerationStructureGeometryInstancesDataKHR instanceGeometry{};
+    instanceGeometry.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    instanceGeometry.arrayOfPointers = VK_FALSE;
+    instanceGeometry.data.deviceAddress = instanceState.deviceAddress;
+    VkAccelerationStructureGeometryKHR geometry{};
+    geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    geometry.geometry.instances = instanceGeometry;
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+    buildInfo.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    buildInfo.geometryCount = 1;
+    buildInfo.pGeometries = &geometry;
+    uint32_t primitiveCount = static_cast<uint32_t>(descriptors.size());
+    VkAccelerationStructureBuildSizesInfoKHR sizes{};
+    sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+    vkGetAccelerationStructureBuildSizesKHR(
+        device.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+        &buildInfo, &primitiveCount, &sizes);
+    VkBuffer accelerationBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory accelerationMemory = VK_NULL_HANDLE;
+    createAccelerationBuffer(device.device, device.physicalDeviceInfo.device,
+                             sizes.accelerationStructureSize,
+                             accelerationBuffer, accelerationMemory);
+    VkAccelerationStructureCreateInfoKHR accelerationInfo{};
+    accelerationInfo.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+    accelerationInfo.buffer = accelerationBuffer;
+    accelerationInfo.size = sizes.accelerationStructureSize;
+    accelerationInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    VkAccelerationStructureKHR accelerationStructure = VK_NULL_HANDLE;
+    VULKAN_GUARD(vkCreateAccelerationStructureKHR(device.device,
+                                                  &accelerationInfo, nullptr,
+                                                  &accelerationStructure),
+                 "Failed to create TLAS");
+    VkBuffer scratchBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory scratchMemory = VK_NULL_HANDLE;
+    createAccelerationBuffer(device.device, device.physicalDeviceInfo.device,
+                             sizes.buildScratchSize, scratchBuffer,
+                             scratchMemory);
+    result->accelerationStructure =
+        vulkan::vulkanHandleToUint64(accelerationStructure);
+    result->accelerationBuffer =
+        vulkan::vulkanHandleToUint64(accelerationBuffer);
+    result->accelerationMemory =
+        vulkan::vulkanHandleToUint64(accelerationMemory);
+    result->scratchBuffer = vulkan::vulkanHandleToUint64(scratchBuffer);
+    result->scratchMemory = vulkan::vulkanHandleToUint64(scratchMemory);
+    return result;
+}
+
+std::shared_ptr<opal::InstanceAccelerationStructure>
+opal::CommandBuffer::buildAccelerationStructures(
+    const std::vector<std::shared_ptr<PrimitiveAccelerationStructure>> &blases,
+    const std::vector<AccelerationStructureInstance> &instances) {
+    for (const auto &blas : blases) {
+        buildPrimitiveAccelerationStructure(blas);
+    }
+    auto tlas = InstanceAccelerationStructure::create(instances);
+    buildInstanceAccelerationStructure(tlas);
+    return tlas;
+}
+
+void opal::CommandBuffer::buildInstanceAccelerationStructure(
+    const std::shared_ptr<InstanceAccelerationStructure> &tlas) {
+    if (tlas == nullptr || tlas->instanceData == nullptr) {
+        throw std::runtime_error("Invalid Vulkan TLAS");
+    }
+    auto &device = vulkan::deviceState(Device::globalInstance);
+    auto &state = vulkan::commandBufferState(this);
+    if (!state.recording || state.commandBuffer == VK_NULL_HANDLE) {
+        throw std::runtime_error(
+            "TLAS build requires recording Vulkan commands");
+    }
+    auto &instanceState = vulkan::bufferState(tlas->instanceData.get());
+    VkAccelerationStructureGeometryInstancesDataKHR instanceGeometry{};
+    instanceGeometry.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    instanceGeometry.data.deviceAddress = instanceState.deviceAddress;
+    VkAccelerationStructureGeometryKHR geometry{};
+    geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    geometry.geometry.instances = instanceGeometry;
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+    buildInfo.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    buildInfo.dstAccelerationStructure =
+        vulkan::vulkanHandleFromUint64<VkAccelerationStructureKHR>(
+            tlas->accelerationStructure);
+    buildInfo.scratchData.deviceAddress = bufferAddress(
+        device.device,
+        vulkan::vulkanHandleFromUint64<VkBuffer>(tlas->scratchBuffer));
+    buildInfo.geometryCount = 1;
+    buildInfo.pGeometries = &geometry;
+    VkAccelerationStructureBuildRangeInfoKHR range{};
+    range.primitiveCount = static_cast<uint32_t>(tlas->blases.size());
+    const VkAccelerationStructureBuildRangeInfoKHR *ranges[] = {&range};
+    vkCmdBuildAccelerationStructuresKHR(state.commandBuffer, 1, &buildInfo,
+                                        ranges);
+    tlas->isBuilt = true;
+}
+
+void opal::CommandBuffer::bindInstanceAccelerationStructure(
+    const std::shared_ptr<InstanceAccelerationStructure> &tlas,
+    uint32_t binding) {
+    if (boundPipeline == nullptr || tlas == nullptr || !tlas->isBuilt) {
+        throw std::runtime_error(
+            "Vulkan TLAS binding requires a built pipeline and TLAS");
+    }
+    auto &pipeline = vulkan::pipelineState(boundPipeline.get());
+    pipeline.boundAccelerationStructures[vulkan::bindingKey(0, binding)] = tlas;
+    pipeline.descriptorsDirty = true;
 }
 
 #endif

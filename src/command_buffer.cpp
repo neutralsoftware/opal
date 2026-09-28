@@ -540,8 +540,7 @@ getRenderPipelineState(Device *device,
     key += "|" + std::to_string(static_cast<int>(pipelineState.blendSrc));
     key += "|" + std::to_string(static_cast<int>(pipelineState.blendDst));
     key += "|" + std::to_string(static_cast<int>(pipelineState.blendOp));
-    key +=
-        "|" + std::to_string(static_cast<int>(pipelineState.colorWriteMask));
+    key += "|" + std::to_string(static_cast<int>(pipelineState.colorWriteMask));
     key +=
         "|" + std::to_string(static_cast<int>(pipelineState.depthTestEnabled));
     key +=
@@ -2208,10 +2207,10 @@ void CommandBuffer::applyScissor() {
         MTL::ScissorRect scissor{
             static_cast<NS::UInteger>(effectiveX),
             static_cast<NS::UInteger>(effectiveY),
-            static_cast<NS::UInteger>(std::clamp(
-                scissorWidth, 0, framebufferWidth - effectiveX)),
-            static_cast<NS::UInteger>(std::clamp(
-                scissorHeight, 0, framebufferHeight - effectiveY))};
+            static_cast<NS::UInteger>(
+                std::clamp(scissorWidth, 0, framebufferWidth - effectiveX)),
+            static_cast<NS::UInteger>(
+                std::clamp(scissorHeight, 0, framebufferHeight - effectiveY))};
         state.encoder->setScissorRect(scissor);
     }
 #elif defined(VULKAN)
@@ -2715,6 +2714,41 @@ void CommandBuffer::dispatch(uint threadCountX, uint threadCountY,
         (std::max(threadCountZ, 1u) + groupSizeZ - 1) / groupSizeZ;
 
     vkCmdDispatch(state.commandBuffer, groupsX, groupsY, groupsZ);
+#endif
+}
+
+void CommandBuffer::dispatchRays(uint width, uint height, uint depth) {
+#ifdef VULKAN
+    if (boundPipeline == nullptr || boundPipeline->shaderProgram == nullptr ||
+        !boundPipeline->shaderProgram->isRayTracingProgram()) {
+        throw std::runtime_error(
+            "dispatchRays requires a ray-tracing pipeline");
+    }
+    auto &state = vulkan::commandBufferState(this);
+    if (!state.recording) {
+        throw std::runtime_error(
+            "dispatchRays requires command buffer recording");
+    }
+    if (state.rendering) {
+        endPass();
+    }
+    vulkan::RenderTargetSignature target{};
+    vulkan::bindPipeline(this, boundPipeline.get(), target, {1, 1});
+    auto &pipelineState = vulkan::pipelineState(boundPipeline.get());
+    if (pipelineState.rayTracingPipeline == VK_NULL_HANDLE ||
+        pipelineState.shaderBindingTable == nullptr) {
+        throw std::runtime_error(
+            "Ray-tracing pipeline has no shader-binding table");
+    }
+    vkCmdTraceRaysKHR(state.commandBuffer, &pipelineState.raygenRegion,
+                      &pipelineState.missRegion, &pipelineState.hitRegion,
+                      &pipelineState.callableRegion, std::max(width, 1u),
+                      std::max(height, 1u), std::max(depth, 1u));
+#else
+    (void)width;
+    (void)height;
+    (void)depth;
+    throw std::runtime_error("Ray tracing is not supported by this backend");
 #endif
 }
 

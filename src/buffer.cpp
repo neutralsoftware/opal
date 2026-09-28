@@ -137,7 +137,8 @@ std::shared_ptr<Buffer> Buffer::create(BufferUsage usage, size_t size,
     }
 
     auto &state = vulkan::bufferState(buffer.get());
-    state.size = std::max<VkDeviceSize>(static_cast<VkDeviceSize>(size), 1);
+    state.size = std::max<VkDeviceSize>(
+        vulkan::vulkanHandleFromUint64<VkDeviceSize>(size), 1);
 
     state.usageFlags = vulkan::bufferUsageToVk(usage);
 
@@ -146,6 +147,14 @@ std::shared_ptr<Buffer> Buffer::create(BufferUsage usage, size_t size,
 
     vulkan::createBuffer(deviceState, state.size, state.usageFlags,
                          state.memoryProperties, state.buffer, state.memory);
+
+    if ((state.usageFlags & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0) {
+        VkBufferDeviceAddressInfo addressInfo{};
+        addressInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+        addressInfo.buffer = state.buffer;
+        state.deviceAddress =
+            vkGetBufferDeviceAddress(deviceState.device, &addressInfo);
+    }
 
     VULKAN_GUARD(vkMapMemory(deviceState.device, state.memory, 0, state.size, 0,
                              &state.mapped),
@@ -257,7 +266,8 @@ void Buffer::updateData(size_t offset, size_t size, const void *data) {
         throw std::runtime_error("Vulkan buffer is not initialized");
     }
 
-    const VkDeviceSize requiredSize = static_cast<VkDeviceSize>(offset + size);
+    const VkDeviceSize requiredSize =
+        vulkan::vulkanHandleFromUint64<VkDeviceSize>(offset + size);
 
     if (requiredSize > state.size) {
         VkBuffer newBuffer = VK_NULL_HANDLE;

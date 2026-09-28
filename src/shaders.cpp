@@ -391,6 +391,7 @@ void ShaderProgram::attachShader(const std::shared_ptr<Shader> &shader,
 
 void ShaderProgram::link() {
     this->computeProgram = false;
+    this->rayTracingProgram = false;
     for (const auto &shader : attachedShaders) {
         if (shader != nullptr && shader->type == ShaderType::Compute) {
             this->computeProgram = true;
@@ -506,6 +507,8 @@ void ShaderProgram::link() {
     bool hasGeometry = false;
     bool hasTessellationControl = false;
     bool hasTessellationEvaluation = false;
+    bool hasRayGeneration = false;
+    bool hasRayTracingStage = false;
 
     for (const auto &shader : attachedShaders) {
 
@@ -567,12 +570,38 @@ void ShaderProgram::link() {
             hasTessellationEvaluation = true;
             break;
 
+        case ShaderType::RayGeneration:
+            if (hasRayGeneration) {
+                throw std::runtime_error(
+                    "Duplicate Vulkan ray-generation shader");
+            }
+            hasRayGeneration = true;
+            hasRayTracingStage = true;
+            break;
+
+        case ShaderType::Miss:
+        case ShaderType::ClosestHit:
+        case ShaderType::AnyHit:
+        case ShaderType::Intersection:
+        case ShaderType::Callable:
+            hasRayTracingStage = true;
+            break;
+
         default:
             break;
         }
     }
 
-    if (hasCompute) {
+    if (hasRayTracingStage) {
+        if (hasCompute || hasVertex || hasFragment || hasGeometry ||
+            hasTessellationControl || hasTessellationEvaluation ||
+            !hasRayGeneration) {
+            throw std::runtime_error(
+                "Vulkan ray-tracing programs require one ray-generation "
+                "shader and no graphics or compute stages");
+        }
+        this->rayTracingProgram = true;
+    } else if (hasCompute) {
         if (attachedShaders.size() != 1 || !hasCompute) {
             throw std::runtime_error(
                 "Vulkan compute program must contain only a compute shader");

@@ -58,6 +58,9 @@ PhysicalDeviceInfo pickPhysicalDevice(VkInstance instance,
         VkPhysicalDeviceVulkan13Features features13{};
         features13.sType =
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+        VkPhysicalDeviceVulkan12Features features12{};
+        features12.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
 
         VkPhysicalDevicePortabilitySubsetFeaturesKHR portabilityFeatures{};
         portabilityFeatures.sType =
@@ -71,17 +74,35 @@ PhysicalDeviceInfo pickPhysicalDevice(VkInstance instance,
         const bool hasVertexAttributeDivisor = hasDeviceExtension(
             device, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
 
+        VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationFeatures{};
+        accelerationFeatures.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+        VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingFeatures{};
+        rayTracingFeatures.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
+        accelerationFeatures.pNext = &rayTracingFeatures;
+        const bool hasRayTracing = supportsRayTracing(device);
+
+        features12.pNext = &features13;
         features13.pNext =
-            hasPortabilitySubset ? static_cast<void *>(&portabilityFeatures)
+            hasRayTracing          ? static_cast<void *>(&accelerationFeatures)
+            : hasPortabilitySubset ? static_cast<void *>(&portabilityFeatures)
             : hasVertexAttributeDivisor ? static_cast<void *>(&divisorFeatures)
                                         : nullptr;
+        if (hasRayTracing) {
+            rayTracingFeatures.pNext =
+                hasPortabilitySubset ? static_cast<void *>(&portabilityFeatures)
+                : hasVertexAttributeDivisor
+                    ? static_cast<void *>(&divisorFeatures)
+                    : nullptr;
+        }
         if (hasPortabilitySubset && hasVertexAttributeDivisor) {
             portabilityFeatures.pNext = &divisorFeatures;
         }
 
         VkPhysicalDeviceFeatures2 features{};
         features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-        features.pNext = &features13;
+        features.pNext = &features12;
         vkGetPhysicalDeviceFeatures2(device, &features);
 
         DeviceQueueFamilies queueFamilies = findQueueFamilies(device, surface);
@@ -139,6 +160,8 @@ PhysicalDeviceInfo pickPhysicalDevice(VkInstance instance,
         PhysicalDeviceInfo info{};
         info.device = device;
         info.features = features;
+        info.features12 = features12;
+        info.features12.pNext = nullptr;
         info.features13 = features13;
         info.features13.pNext = nullptr;
         info.portabilityFeatures = portabilityFeatures;
@@ -149,6 +172,13 @@ PhysicalDeviceInfo pickPhysicalDevice(VkInstance instance,
         info.hasVertexAttributeDivisor =
             hasVertexAttributeDivisor &&
             divisorFeatures.vertexAttributeInstanceRateDivisor;
+        info.hasRayTracing = hasRayTracing && features12.bufferDeviceAddress &&
+                             accelerationFeatures.accelerationStructure &&
+                             rayTracingFeatures.rayTracingPipeline;
+        info.accelerationStructureFeatures = accelerationFeatures;
+        info.accelerationStructureFeatures.pNext = nullptr;
+        info.rayTracingPipelineFeatures = rayTracingFeatures;
+        info.rayTracingPipelineFeatures.pNext = nullptr;
         info.features.pNext = nullptr;
         info.queueFamilies = queueFamilies;
         info.properties = deviceProperties;
@@ -238,6 +268,7 @@ bool supportsRayTracing(VkPhysicalDevice device) {
 
     bool hasAccelerationStructure = false;
     bool hasRayTracingPipeline = false;
+    bool hasDeferredHostOperations = false;
 
     for (const auto &extension : extensions) {
         if (strcmp(extension.extensionName,
@@ -249,9 +280,14 @@ bool supportsRayTracing(VkPhysicalDevice device) {
                    VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME) == 0) {
             hasRayTracingPipeline = true;
         }
+        if (strcmp(extension.extensionName,
+                   VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) == 0) {
+            hasDeferredHostOperations = true;
+        }
     }
 
-    if (!hasAccelerationStructure || !hasRayTracingPipeline)
+    if (!hasAccelerationStructure || !hasRayTracingPipeline ||
+        !hasDeferredHostOperations)
         return false;
 
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingFeatures{};
@@ -311,6 +347,13 @@ VkDevice createLogicalDevice(const PhysicalDeviceInfo &physicalDeviceInfo) {
 
     std::vector<const char *> deviceExtensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    if (physicalDeviceInfo.hasRayTracing) {
+        deviceExtensions.push_back(
+            VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
+        deviceExtensions.push_back(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
+        deviceExtensions.push_back(
+            VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+    }
     if (hasDeviceExtension(physicalDeviceInfo.device,
                            VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) {
         deviceExtensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
@@ -324,6 +367,25 @@ VkDevice createLogicalDevice(const PhysicalDeviceInfo &physicalDeviceInfo) {
     features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     features13.dynamicRendering = VK_TRUE;
     features13.synchronization2 = VK_TRUE;
+
+    VkPhysicalDeviceVulkan12Features features12 = physicalDeviceInfo.features12;
+    features12.pNext = &features13;
+    if (physicalDeviceInfo.hasRayTracing) {
+        features12.bufferDeviceAddress = VK_TRUE;
+    }
+
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationFeatures{};
+    accelerationFeatures.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+    VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingFeatures{};
+    rayTracingFeatures.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
+    if (physicalDeviceInfo.hasRayTracing) {
+        accelerationFeatures.accelerationStructure = VK_TRUE;
+        rayTracingFeatures.rayTracingPipeline = VK_TRUE;
+        accelerationFeatures.pNext = &rayTracingFeatures;
+        features13.pNext = &accelerationFeatures;
+    }
 
     VkPhysicalDevicePortabilitySubsetFeaturesKHR portabilityFeatures{};
     portabilityFeatures.sType =
@@ -370,11 +432,16 @@ VkDevice createLogicalDevice(const PhysicalDeviceInfo &physicalDeviceInfo) {
         divisorFeatures.vertexAttributeInstanceRateDivisor = VK_TRUE;
     }
 
-    features13.pNext = physicalDeviceInfo.hasPortabilitySubset
-                           ? static_cast<void *>(&portabilityFeatures)
-                       : physicalDeviceInfo.hasVertexAttributeDivisor
-                           ? static_cast<void *>(&divisorFeatures)
-                           : nullptr;
+    void *optionalFeatures = physicalDeviceInfo.hasPortabilitySubset
+                                 ? static_cast<void *>(&portabilityFeatures)
+                             : physicalDeviceInfo.hasVertexAttributeDivisor
+                                 ? static_cast<void *>(&divisorFeatures)
+                                 : nullptr;
+    if (physicalDeviceInfo.hasRayTracing) {
+        rayTracingFeatures.pNext = optionalFeatures;
+    } else {
+        features13.pNext = optionalFeatures;
+    }
     if (physicalDeviceInfo.hasPortabilitySubset &&
         physicalDeviceInfo.hasVertexAttributeDivisor) {
         portabilityFeatures.pNext = &divisorFeatures;
@@ -385,7 +452,7 @@ VkDevice createLogicalDevice(const PhysicalDeviceInfo &physicalDeviceInfo) {
 
     features2.features = physicalDeviceInfo.features.features;
 
-    features2.pNext = &features13;
+    features2.pNext = &features12;
 
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -469,7 +536,10 @@ VkBufferUsageFlags bufferUsageToVk(BufferUsage usage) {
     case BufferUsage::GeneralPurpose:
         return VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-               VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+               VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+               VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+               VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR;
 
     default:
         throw std::runtime_error("Unsupported Vulkan buffer usage");
@@ -496,9 +566,15 @@ void createBuffer(DeviceState &deviceState, VkDeviceSize size,
     vkGetBufferMemoryRequirements(deviceState.device, buffer,
                                   &memoryRequirements);
 
+    VkMemoryAllocateFlagsInfo addressFlags{};
+    addressFlags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+    addressFlags.flags =
+        (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0
+            ? VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT
+            : 0;
     VkMemoryAllocateInfo allocationInfo{
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .pNext = nullptr,
+        .pNext = addressFlags.flags != 0 ? &addressFlags : nullptr,
         .allocationSize = memoryRequirements.size,
         .memoryTypeIndex =
             findMemoryType(deviceState.physicalDeviceInfo.device,

@@ -344,8 +344,7 @@ uint16_t floatToHalf(float value) {
     std::memcpy(&bits, &value, sizeof(bits));
     uint32_t sign = (bits >> 16) & 0x8000u;
     uint32_t mantissa = bits & 0x007fffffu;
-    int32_t exponent =
-        static_cast<int32_t>((bits >> 23) & 0xffu) - 127 + 15;
+    int32_t exponent = static_cast<int32_t>((bits >> 23) & 0xffu) - 127 + 15;
     if (exponent <= 0) {
         if (exponent < -10) {
             return static_cast<uint16_t>(sign);
@@ -393,8 +392,7 @@ float halfToFloat(uint16_t value) {
                 --exponent;
             }
             mantissa &= 0x03ffu;
-            bits = sign |
-                   (static_cast<uint32_t>(exponent + 112) << 23) |
+            bits = sign | (static_cast<uint32_t>(exponent + 112) << 23) |
                    (mantissa << 13);
         }
     } else if (exponent == 31) {
@@ -440,8 +438,7 @@ size_t textureFormatChannels(TextureFormat format) {
 
 bool isHalfTextureFormat(TextureFormat format) {
     return format == TextureFormat::Rgba16F ||
-           format == TextureFormat::Rgb16F ||
-           format == TextureFormat::Red16F;
+           format == TextureFormat::Rgb16F || format == TextureFormat::Red16F;
 }
 
 bool isDepthTextureFormat(TextureFormat format) {
@@ -500,17 +497,15 @@ VulkanUploadData prepareVulkanUpload(const void *data, size_t texelCount,
                 channelSize);
         }
 
-        uint8_t *destination =
-            upload.bytes.data() + texel * destinationSize;
+        uint8_t *destination = upload.bytes.data() + texel * destinationSize;
         if (format == TextureFormat::Depth32F) {
             std::memcpy(destination, channels, sizeof(float));
         } else if (format == TextureFormat::DepthComponent24 ||
                    format == TextureFormat::Depth24Stencil8) {
             uint32_t depth = static_cast<uint32_t>(
                 std::clamp(channels[0], 0.0f, 1.0f) * 16777215.0f);
-            uint32_t packed = format == TextureFormat::DepthComponent24
-                                  ? depth << 8
-                                  : depth;
+            uint32_t packed =
+                format == TextureFormat::DepthComponent24 ? depth << 8 : depth;
             std::memcpy(destination, &packed, sizeof(packed));
         } else if (isHalfTextureFormat(format)) {
             for (size_t channel = 0; channel < destinationChannels; ++channel) {
@@ -547,9 +542,9 @@ void createTransferBuffer(vulkan::DeviceState &deviceState, VkDeviceSize size,
     VkMemoryAllocateInfo allocationInfo{};
     allocationInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocationInfo.allocationSize = requirements.size;
-    allocationInfo.memoryTypeIndex = vulkan::findMemoryType(
-        deviceState.physicalDeviceInfo.device, requirements.memoryTypeBits,
-        properties);
+    allocationInfo.memoryTypeIndex =
+        vulkan::findMemoryType(deviceState.physicalDeviceInfo.device,
+                               requirements.memoryTypeBits, properties);
 
     VkResult result = vkAllocateMemory(deviceState.device, &allocationInfo,
                                        nullptr, &buffer.memory);
@@ -558,9 +553,9 @@ void createTransferBuffer(vulkan::DeviceState &deviceState, VkDeviceSize size,
         buffer.buffer = VK_NULL_HANDLE;
         VULKAN_GUARD(result, "Failed to allocate Vulkan transfer memory");
     }
-    VULKAN_GUARD(vkBindBufferMemory(deviceState.device, buffer.buffer,
-                                    buffer.memory, 0),
-                 "Failed to bind Vulkan transfer memory");
+    VULKAN_GUARD(
+        vkBindBufferMemory(deviceState.device, buffer.buffer, buffer.memory, 0),
+        "Failed to bind Vulkan transfer memory");
 }
 
 void destroyTransferBuffer(vulkan::DeviceState &deviceState,
@@ -922,8 +917,9 @@ void readVulkanTexture(Texture *texture, void *output,
     }
     auto &deviceState = vulkan::deviceState(Device::globalInstance);
     auto &state = vulkan::textureState(texture);
-    VkDeviceSize size = static_cast<VkDeviceSize>(state.width) * state.height *
-                        state.depth * vulkan::bytesPerPixel(texture->format);
+    VkDeviceSize size =
+        vulkan::vulkanHandleFromUint64<VkDeviceSize>(state.width) *
+        state.height * state.depth * vulkan::bytesPerPixel(texture->format);
     VulkanTransferBuffer staging{};
     createTransferBuffer(deviceState, size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
@@ -948,11 +944,11 @@ void readVulkanTexture(Texture *texture, void *output,
     vulkan::endSingleTimeCommands(deviceState, commandBuffer);
 
     void *mapped = nullptr;
-    VULKAN_GUARD(vkMapMemory(deviceState.device, staging.memory, 0, size, 0,
-                             &mapped),
-                 "Failed to map Vulkan texture readback memory");
-    size_t texelCount = static_cast<size_t>(state.width) * state.height *
-                        state.depth;
+    VULKAN_GUARD(
+        vkMapMemory(deviceState.device, staging.memory, 0, size, 0, &mapped),
+        "Failed to map Vulkan texture readback memory");
+    size_t texelCount =
+        static_cast<size_t>(state.width) * state.height * state.depth;
     size_t sourceChannels = textureFormatChannels(texture->format);
     size_t outputChannels = dataFormatChannels(dataFormat);
     size_t outputChannelSize = sourceChannelSize(texture->format, dataFormat);
@@ -976,8 +972,7 @@ void readVulkanTexture(Texture *texture, void *output,
         } else if (isHalfTextureFormat(texture->format)) {
             for (size_t channel = 0; channel < sourceChannels; ++channel) {
                 uint16_t half = 0;
-                std::memcpy(&half,
-                            sourceTexel + channel * sizeof(uint16_t),
+                std::memcpy(&half, sourceTexel + channel * sizeof(uint16_t),
                             sizeof(half));
                 channels[channel] = halfToFloat(half);
             }
@@ -999,9 +994,8 @@ void readVulkanTexture(Texture *texture, void *output,
                 }
             }
             uint8_t *outputChannel =
-                destination +
-                ((texel * outputChannels + destinationChannel) *
-                 outputChannelSize);
+                destination + ((texel * outputChannels + destinationChannel) *
+                               outputChannelSize);
             if (outputChannelSize == sizeof(float)) {
                 std::memcpy(outputChannel, &channels[channel], sizeof(float));
             } else {
@@ -1183,8 +1177,8 @@ std::shared_ptr<Texture> Texture::create(TextureType type, TextureFormat format,
                            : 1;
     if (type != TextureType::Texture2DMultisample) {
         uint32_t maximumMipLevels =
-            static_cast<uint32_t>(std::floor(std::log2(
-                static_cast<double>(std::max(width, height))))) +
+            static_cast<uint32_t>(std::floor(
+                std::log2(static_cast<double>(std::max(width, height))))) +
             1;
         texture->mipLevels =
             std::min<uint32_t>(texture->mipLevels, maximumMipLevels);
@@ -1244,8 +1238,8 @@ void Texture::updateFace(int faceIndex, const void *data, int width, int height,
         region, 0, static_cast<NS::UInteger>(faceIndex), upload.bytes,
         upload.bytesPerRow, upload.bytesPerImage);
 #elif VULKAN
-    if (type != TextureType::TextureCubeMap || faceIndex < 0 || faceIndex >= 6 ||
-        data == nullptr || width <= 0 || height <= 0) {
+    if (type != TextureType::TextureCubeMap || faceIndex < 0 ||
+        faceIndex >= 6 || data == nullptr || width <= 0 || height <= 0) {
         return;
     }
     if (this->width != width || this->height != height) {
@@ -1514,13 +1508,12 @@ void Texture::generateMipmaps([[maybe_unused]] uint levels) {
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
                        VK_FILTER_LINEAR);
 
+        transitionVulkanImage(
+            commandBuffer, state, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            state.layout, mipLevel - 1, 1, 0, state.arrayLayers);
         transitionVulkanImage(commandBuffer, state,
-                              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                              state.layout, mipLevel - 1, 1, 0,
-                              state.arrayLayers);
-        transitionVulkanImage(commandBuffer, state,
-                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, state.layout,
-                              mipLevel, 1, 0, state.arrayLayers);
+                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                              state.layout, mipLevel, 1, 0, state.arrayLayers);
         mipWidth = std::max(mipWidth / 2, 1);
         mipHeight = std::max(mipHeight / 2, 1);
         mipDepth = std::max(mipDepth / 2, 1);
@@ -1917,15 +1910,13 @@ std::shared_ptr<Texture> Texture::createDepthCubemap(TextureFormat format,
                            resolution, TextureDataFormat::DepthComponent,
                            nullptr, 1);
 #elif VULKAN
-    auto texture = Texture::create(TextureType::TextureCubeMap, format,
-                                   resolution, resolution,
-                                   TextureDataFormat::DepthComponent, nullptr,
-                                   1);
-    texture->setParameters3D(TextureWrapMode::ClampToEdge,
-                             TextureWrapMode::ClampToEdge,
-                             TextureWrapMode::ClampToEdge,
-                             TextureFilterMode::Nearest,
-                             TextureFilterMode::Nearest);
+    auto texture = Texture::create(
+        TextureType::TextureCubeMap, format, resolution, resolution,
+        TextureDataFormat::DepthComponent, nullptr, 1);
+    texture->setParameters3D(
+        TextureWrapMode::ClampToEdge, TextureWrapMode::ClampToEdge,
+        TextureWrapMode::ClampToEdge, TextureFilterMode::Nearest,
+        TextureFilterMode::Nearest);
     return texture;
 #else
     return nullptr;

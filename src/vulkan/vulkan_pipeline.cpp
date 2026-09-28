@@ -447,6 +447,183 @@ VkPipeline createOrGetGraphicsPipeline(Pipeline *pipeline,
     return vkPipeline;
 }
 
+VkPipeline createOrGetRayTracingPipeline(Pipeline *pipeline) {
+    auto &state = pipelineState(pipeline);
+    if (state.rayTracingPipeline != VK_NULL_HANDLE) {
+        return state.rayTracingPipeline;
+    }
+    if (pipeline == nullptr || pipeline->shaderProgram == nullptr ||
+        !pipeline->shaderProgram->isRayTracingProgram()) {
+        throw std::runtime_error("Pipeline is not a ray-tracing program");
+    }
+    auto &program = programState(pipeline->shaderProgram.get());
+    auto &device = deviceState(Device::globalInstance);
+    if (!device.physicalDeviceInfo.hasRayTracing) {
+        throw std::runtime_error(
+            "Selected Vulkan device does not support ray tracing");
+    }
+
+    state.rayTracingGroups.clear();
+    int raygenStage = -1;
+    int anyHitStage = -1;
+    int intersectionStage = -1;
+    for (uint32_t index = 0; index < program.shaderStages.size(); ++index) {
+        if (program.shaderStages[index].stage ==
+            VK_SHADER_STAGE_ANY_HIT_BIT_KHR) {
+            anyHitStage = static_cast<int>(index);
+        } else if (program.shaderStages[index].stage ==
+                   VK_SHADER_STAGE_INTERSECTION_BIT_KHR) {
+            intersectionStage = static_cast<int>(index);
+        }
+    }
+    for (uint32_t index = 0; index < program.shaderStages.size(); ++index) {
+        const auto stage = program.shaderStages[index].stage;
+        VkRayTracingShaderGroupCreateInfoKHR group{};
+        group.sType =
+            VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+        group.generalShader = VK_SHADER_UNUSED_KHR;
+        group.closestHitShader = VK_SHADER_UNUSED_KHR;
+        group.anyHitShader = VK_SHADER_UNUSED_KHR;
+        group.intersectionShader = VK_SHADER_UNUSED_KHR;
+        if (stage == VK_SHADER_STAGE_RAYGEN_BIT_KHR ||
+            stage == VK_SHADER_STAGE_MISS_BIT_KHR ||
+            stage == VK_SHADER_STAGE_CALLABLE_BIT_KHR) {
+            group.type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+            group.generalShader = index;
+            if (stage == VK_SHADER_STAGE_RAYGEN_BIT_KHR) {
+                if (raygenStage >= 0) {
+                    throw std::runtime_error(
+                        "Only one ray-generation shader is supported");
+                }
+                raygenStage = static_cast<int>(state.rayTracingGroups.size());
+            }
+        } else if (stage == VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR) {
+            group.type =
+                VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
+            group.closestHitShader = index;
+            group.anyHitShader = anyHitStage < 0
+                                     ? VK_SHADER_UNUSED_KHR
+                                     : static_cast<uint32_t>(anyHitStage);
+            group.intersectionShader =
+                intersectionStage < 0
+                    ? VK_SHADER_UNUSED_KHR
+                    : static_cast<uint32_t>(intersectionStage);
+        } else if (stage == VK_SHADER_STAGE_ANY_HIT_BIT_KHR) {
+            continue;
+        } else if (stage == VK_SHADER_STAGE_INTERSECTION_BIT_KHR) {
+            continue;
+        } else {
+            continue;
+        }
+        state.rayTracingGroups.push_back(group);
+    }
+    auto groupStage = [&](const VkRayTracingShaderGroupCreateInfoKHR &group) {
+        return program
+            .shaderStages[group.generalShader != VK_SHADER_UNUSED_KHR
+                              ? group.generalShader
+                              : group.closestHitShader]
+            .stage;
+    };
+    std::stable_sort(state.rayTracingGroups.begin(),
+                     state.rayTracingGroups.end(),
+                     [&](const auto &left, const auto &right) {
+                         auto category = [&](const auto &group) {
+                             const auto stage = groupStage(group);
+                             if (stage == VK_SHADER_STAGE_RAYGEN_BIT_KHR)
+                                 return 0;
+                             if (stage == VK_SHADER_STAGE_MISS_BIT_KHR)
+                                 return 1;
+                             if (stage == VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)
+                                 return 2;
+                             return 3;
+                         };
+                         return category(left) < category(right);
+                     });
+    raygenStage = -1;
+    for (uint32_t index = 0; index < state.rayTracingGroups.size(); ++index) {
+        if (groupStage(state.rayTracingGroups[index]) ==
+            VK_SHADER_STAGE_RAYGEN_BIT_KHR) {
+            raygenStage = static_cast<int>(index);
+            break;
+        }
+    }
+    if (raygenStage < 0) {
+        throw std::runtime_error(
+            "Ray-tracing pipeline requires a ray-generation shader");
+    }
+
+    VkRayTracingPipelineCreateInfoKHR info{};
+    info.sType = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR;
+    info.stageCount = static_cast<uint32_t>(program.shaderStages.size());
+    info.pStages = program.shaderStages.data();
+    info.groupCount = static_cast<uint32_t>(state.rayTracingGroups.size());
+    info.pGroups = state.rayTracingGroups.data();
+    info.maxPipelineRayRecursionDepth = 1;
+    info.layout = program.pipelineLayout;
+    VULKAN_GUARD(vkCreateRayTracingPipelinesKHR(
+                     device.device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &info,
+                     nullptr, &state.rayTracingPipeline),
+                 "Failed to create Vulkan ray-tracing pipeline");
+
+    VkPhysicalDeviceRayTracingPipelinePropertiesKHR properties{};
+    properties.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
+    VkPhysicalDeviceProperties2 physicalProperties{};
+    physicalProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    physicalProperties.pNext = &properties;
+    vkGetPhysicalDeviceProperties2(device.physicalDeviceInfo.device,
+                                   &physicalProperties);
+    uint32_t handleSize = properties.shaderGroupHandleSize;
+    uint32_t stride = (handleSize + properties.shaderGroupHandleAlignment - 1) /
+                      properties.shaderGroupHandleAlignment *
+                      properties.shaderGroupHandleAlignment;
+    uint32_t sbtSize =
+        stride * static_cast<uint32_t>(state.rayTracingGroups.size());
+    std::vector<uint8_t> handles(sbtSize);
+    VULKAN_GUARD(vkGetRayTracingShaderGroupHandlesKHR(
+                     device.device, state.rayTracingPipeline, 0,
+                     static_cast<uint32_t>(state.rayTracingGroups.size()),
+                     handles.size(), handles.data()),
+                 "Failed to retrieve Vulkan shader-group handles");
+    state.shaderBindingTable =
+        Buffer::create(BufferUsage::GeneralPurpose, handles.size(),
+                       handles.data(), MemoryUsageType::CPUToGPU);
+    auto &sbtState = bufferState(state.shaderBindingTable.get());
+    VkDeviceAddress sbtAddress = sbtState.deviceAddress;
+    VkStridedDeviceAddressRegionKHR raygenRegion{
+        sbtAddress + raygenStage * stride, stride, stride};
+    VkStridedDeviceAddressRegionKHR missRegion{};
+    VkStridedDeviceAddressRegionKHR hitRegion{};
+    VkStridedDeviceAddressRegionKHR callableRegion{};
+    for (uint32_t index = 0; index < state.rayTracingGroups.size(); ++index) {
+        const auto stage = groupStage(state.rayTracingGroups[index]);
+        auto setRegion = [&](VkStridedDeviceAddressRegionKHR &region) {
+            if (region.size == 0) {
+                region.deviceAddress = sbtAddress + index * stride;
+                region.stride = stride;
+            }
+            region.size += stride;
+        };
+        if (stage == VK_SHADER_STAGE_MISS_BIT_KHR) {
+            setRegion(missRegion);
+        } else if (stage == VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR) {
+            setRegion(hitRegion);
+        } else if (stage == VK_SHADER_STAGE_CALLABLE_BIT_KHR) {
+            setRegion(callableRegion);
+        }
+    }
+    state.rayGenerationGroup = raygenStage;
+    state.missGroupFirst = missRegion.size ? 1 : 0;
+    state.missGroupCount = missRegion.size ? 1 : 0;
+    state.hitGroupFirst = hitRegion.size ? 1 : 0;
+    state.hitGroupCount = hitRegion.size ? 1 : 0;
+    state.raygenRegion = raygenRegion;
+    state.missRegion = missRegion;
+    state.hitRegion = hitRegion;
+    state.callableRegion = callableRegion;
+    return state.rayTracingPipeline;
+}
+
 void bindPipeline(CommandBuffer *commandBuffer, Pipeline *pipeline,
                   const RenderTargetSignature &target,
                   VkExtent2D renderExtent) {
@@ -471,11 +648,15 @@ void bindPipeline(CommandBuffer *commandBuffer, Pipeline *pipeline,
     auto &programState = vulkan::programState(pipeline->shaderProgram.get());
 
     const bool compute = pipeline->shaderProgram->isComputeProgram();
+    const bool rayTracing = pipeline->shaderProgram->isRayTracingProgram();
 
     VkPipeline vkPipeline = VK_NULL_HANDLE;
     VkPipelineBindPoint bindPoint;
 
-    if (compute) {
+    if (rayTracing) {
+        vkPipeline = createOrGetRayTracingPipeline(pipeline);
+        bindPoint = VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR;
+    } else if (compute) {
         vkPipeline = pipelineState.computePipeline;
         bindPoint = VK_PIPELINE_BIND_POINT_COMPUTE;
     } else {
@@ -505,7 +686,7 @@ void bindPipeline(CommandBuffer *commandBuffer, Pipeline *pipeline,
     cmdState.boundPipelineLayout = programState.pipelineLayout;
     cmdState.boundPipelineBindPoint = bindPoint;
 
-    if (!compute) {
+    if (!compute && !rayTracing) {
         applyDynamicPipelineState(commandBuffer, pipeline, renderExtent);
     }
 }
@@ -629,6 +810,8 @@ void updateDescriptors(CommandBuffer *commandBuffer, Pipeline *pipeline) {
 
     std::vector<VkDescriptorBufferInfo> bufferInfos;
     std::vector<VkDescriptorImageInfo> imageInfos;
+    std::vector<VkAccelerationStructureKHR> accelerationHandles;
+    std::vector<VkWriteDescriptorSetAccelerationStructureKHR> accelerationInfos;
     std::vector<VkWriteDescriptorSet> writes;
 
     size_t descriptorCount = 0;
@@ -637,10 +820,49 @@ void updateDescriptors(CommandBuffer *commandBuffer, Pipeline *pipeline) {
     }
     bufferInfos.reserve(descriptorCount);
     imageInfos.reserve(descriptorCount);
+    accelerationHandles.reserve(descriptorCount);
+    accelerationInfos.reserve(descriptorCount);
     writes.reserve(program.bindings.size());
 
     for (const auto &binding : program.bindings) {
         uint64_t key = bindingKey(binding.set, binding.binding);
+        if (binding.type == ShaderResourceType::AccelerationStructure) {
+            auto accelerationIt = state.boundAccelerationStructures.find(key);
+
+            if (accelerationIt == state.boundAccelerationStructures.end() ||
+                accelerationIt->second == nullptr ||
+                !accelerationIt->second->isBuilt) {
+                continue;
+            }
+
+            accelerationHandles.push_back(
+                reinterpret_cast<VkAccelerationStructureKHR>(
+                    static_cast<uintptr_t>(
+                        accelerationIt->second->nativeHandle())));
+
+            accelerationInfos.push_back({});
+
+            auto &accelerationInfo = accelerationInfos.back();
+            accelerationInfo.sType =
+                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+            accelerationInfo.accelerationStructureCount = 1;
+            accelerationInfo.pAccelerationStructures =
+                &accelerationHandles.back();
+
+            writes.push_back({.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                              .pNext = &accelerationInfos.back(),
+                              .dstSet = state.descriptorSets.at(binding.set),
+                              .dstBinding = binding.binding,
+                              .dstArrayElement = 0,
+                              .descriptorCount = 1,
+                              .descriptorType =
+                                  VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
+                              .pImageInfo = nullptr,
+                              .pBufferInfo = nullptr,
+                              .pTexelBufferView = nullptr});
+
+            continue;
+        }
         if (binding.type == ShaderResourceType::UniformBuffer ||
             binding.type == ShaderResourceType::StorageBuffer) {
             auto resourceIt = state.boundBuffers.find(key);
