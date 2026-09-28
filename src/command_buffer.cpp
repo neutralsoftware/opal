@@ -1373,8 +1373,8 @@ void CommandBuffer::beginPass(std::shared_ptr<RenderPass> newRenderPass) {
         }
         int fbWidth = 0;
         int fbHeight = 0;
-        detail::getWindowSizeInPixels(deviceState.context->getWindow(),
-                                      &fbWidth, &fbHeight);
+        SDL_GetWindowSizeInPixels(deviceState.context->getWindow(), &fbWidth,
+                                  &fbHeight);
 #ifdef __APPLE__
         queryMetalDrawableSizeFromView(
             deviceState.context->getMetalTargetView(), fbWidth, fbHeight,

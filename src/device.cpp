@@ -508,8 +508,8 @@ Device::acquire([[maybe_unused]] const std::shared_ptr<Context> &context) {
     int fallbackWidth = 1;
     int fallbackHeight = 1;
     if (context->window != nullptr) {
-        detail::getWindowSizeInPixels(context->window, &fallbackWidth,
-                                      &fallbackHeight);
+        SDL_GetWindowSizeInPixels(context->window, &fallbackWidth,
+                                  &fallbackHeight);
     }
     int fbWidth = fallbackWidth;
     int fbHeight = fallbackHeight;
