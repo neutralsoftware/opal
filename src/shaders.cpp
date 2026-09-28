@@ -21,6 +21,7 @@
 #include <stdexcept>
 #include <string.h>
 #include <string>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 #ifdef METAL
