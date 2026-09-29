@@ -412,6 +412,9 @@ SDL_Window *Context::makeWindowFromNative(void *nativeWindow,
                           width);
     SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER,
                           height);
+    SDL_SetBooleanProperty(
+        properties, SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN,
+        highPixelDensity);
     SDL_SetBooleanProperty(properties,
                            SDL_PROP_WINDOW_CREATE_EXTERNAL_GRAPHICS_CONTEXT_BOOLEAN,
                            true);
@@ -420,6 +423,7 @@ SDL_Window *Context::makeWindowFromNative(void *nativeWindow,
                            true);
 #endif
     if (nativeWindowType == NativeWindowType::Win32) {
+        SDL_SetHint(SDL_HINT_WINDOWS_ENABLE_MESSAGELOOP, "0");
         SDL_SetPointerProperty(properties,
                                SDL_PROP_WINDOW_CREATE_WIN32_HWND_POINTER,
                                nativeWindow);
