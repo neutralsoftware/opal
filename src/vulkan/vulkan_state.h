@@ -93,6 +93,7 @@ struct PhysicalDeviceInfo {
     VkPhysicalDeviceAccelerationStructureFeaturesKHR
         accelerationStructureFeatures{};
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingPipelineFeatures{};
+    VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{};
 
     bool hasPortabilitySubset = false;
     bool hasVertexAttributeDivisor = false;
@@ -111,6 +112,18 @@ struct DeviceState {
 
     VkCommandPool graphicsPool = VK_NULL_HANDLE;
     VkCommandPool computePool = VK_NULL_HANDLE;
+
+    PFN_vkCreateAccelerationStructureKHR createAccelerationStructure = nullptr;
+    PFN_vkDestroyAccelerationStructureKHR destroyAccelerationStructure = nullptr;
+    PFN_vkGetAccelerationStructureBuildSizesKHR
+        getAccelerationStructureBuildSizes = nullptr;
+    PFN_vkCmdBuildAccelerationStructuresKHR buildAccelerationStructures = nullptr;
+    PFN_vkGetAccelerationStructureDeviceAddressKHR
+        getAccelerationStructureDeviceAddress = nullptr;
+    PFN_vkCreateRayTracingPipelinesKHR createRayTracingPipelines = nullptr;
+    PFN_vkGetRayTracingShaderGroupHandlesKHR getRayTracingShaderGroupHandles =
+        nullptr;
+    PFN_vkCmdTraceRaysKHR traceRays = nullptr;
 
     std::shared_ptr<Texture> defaultDepthTexture;
 };
@@ -463,6 +476,7 @@ bool supportsRayTracing(VkPhysicalDevice device);
 PhysicalDeviceInfo buildQueuesAndPhysicalDevice(VkInstance instance,
                                                 VkSurfaceKHR surface);
 VkDevice createLogicalDevice(const PhysicalDeviceInfo &physicalDeviceInfo);
+bool loadRayTracingFunctions(DeviceState &deviceState);
 DeviceQueueFamilies findQueueFamilies(VkPhysicalDevice device,
                                       VkSurfaceKHR surface);
 void createQueues(DeviceState &deviceState);

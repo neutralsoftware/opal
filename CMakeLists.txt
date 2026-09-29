@@ -105,6 +105,10 @@ if(OPAL_RESOLVED_BACKEND STREQUAL "METAL")
         GLM_FORCE_DEPTH_ZERO_TO_ONE
     )
 
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_compile_options(opal PRIVATE -Wno-elaborated-enum-base)
+    endif()
+
     find_library(OPAL_METAL_FRAMEWORK Metal REQUIRED)
     find_library(OPAL_METALFX_FRAMEWORK MetalFX REQUIRED)
     find_library(OPAL_COCOA_FRAMEWORK Cocoa REQUIRED)
@@ -139,6 +143,18 @@ elseif(OPAL_RESOLVED_BACKEND STREQUAL "VULKAN")
     set(SLANG_ENABLE_OPTIX OFF CACHE BOOL "" FORCE)
     set(SLANG_ENABLE_NVAPI OFF CACHE BOOL "" FORCE)
     set(SLANG_ENABLE_AFTERMATH OFF CACHE BOOL "" FORCE)
+
+    set(OPAL_SLANG_LINKED_LIST
+        "${CMAKE_CURRENT_SOURCE_DIR}/third-party/slang/source/core/slang-internally-linked-list.h"
+    )
+    file(READ "${OPAL_SLANG_LINKED_LIST}" OPAL_SLANG_LINKED_LIST_CONTENT)
+    string(REPLACE
+        "using InternallyLinkedListNode = InternallyLinkedList<T>::Node;"
+        "using InternallyLinkedListNode = typename InternallyLinkedList<T>::Node;"
+        OPAL_SLANG_LINKED_LIST_CONTENT
+        "${OPAL_SLANG_LINKED_LIST_CONTENT}"
+    )
+    file(WRITE "${OPAL_SLANG_LINKED_LIST}" "${OPAL_SLANG_LINKED_LIST_CONTENT}")
 
     add_subdirectory(third-party/slang)
 

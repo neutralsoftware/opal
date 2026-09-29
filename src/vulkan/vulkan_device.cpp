@@ -80,7 +80,11 @@ PhysicalDeviceInfo pickPhysicalDevice(VkInstance instance,
         VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingFeatures{};
         rayTracingFeatures.sType =
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
+        VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{};
+        rayQueryFeatures.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
         accelerationFeatures.pNext = &rayTracingFeatures;
+        rayTracingFeatures.pNext = &rayQueryFeatures;
         const bool hasRayTracing = supportsRayTracing(device);
 
         features12.pNext = &features13;
@@ -90,7 +94,7 @@ PhysicalDeviceInfo pickPhysicalDevice(VkInstance instance,
             : hasVertexAttributeDivisor ? static_cast<void *>(&divisorFeatures)
                                         : nullptr;
         if (hasRayTracing) {
-            rayTracingFeatures.pNext =
+            rayQueryFeatures.pNext =
                 hasPortabilitySubset ? static_cast<void *>(&portabilityFeatures)
                 : hasVertexAttributeDivisor
                     ? static_cast<void *>(&divisorFeatures)
@@ -174,11 +178,14 @@ PhysicalDeviceInfo pickPhysicalDevice(VkInstance instance,
             divisorFeatures.vertexAttributeInstanceRateDivisor;
         info.hasRayTracing = hasRayTracing && features12.bufferDeviceAddress &&
                              accelerationFeatures.accelerationStructure &&
-                             rayTracingFeatures.rayTracingPipeline;
+                             rayTracingFeatures.rayTracingPipeline &&
+                             rayQueryFeatures.rayQuery;
         info.accelerationStructureFeatures = accelerationFeatures;
         info.accelerationStructureFeatures.pNext = nullptr;
         info.rayTracingPipelineFeatures = rayTracingFeatures;
         info.rayTracingPipelineFeatures.pNext = nullptr;
+        info.rayQueryFeatures = rayQueryFeatures;
+        info.rayQueryFeatures.pNext = nullptr;
         info.features.pNext = nullptr;
         info.queueFamilies = queueFamilies;
         info.properties = deviceProperties;
@@ -269,6 +276,7 @@ bool supportsRayTracing(VkPhysicalDevice device) {
     bool hasAccelerationStructure = false;
     bool hasRayTracingPipeline = false;
     bool hasDeferredHostOperations = false;
+    bool hasRayQuery = false;
 
     for (const auto &extension : extensions) {
         if (strcmp(extension.extensionName,
@@ -284,10 +292,14 @@ bool supportsRayTracing(VkPhysicalDevice device) {
                    VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) == 0) {
             hasDeferredHostOperations = true;
         }
+        if (strcmp(extension.extensionName,
+                   VK_KHR_RAY_QUERY_EXTENSION_NAME) == 0) {
+            hasRayQuery = true;
+        }
     }
 
     if (!hasAccelerationStructure || !hasRayTracingPipeline ||
-        !hasDeferredHostOperations)
+        !hasDeferredHostOperations || !hasRayQuery)
         return false;
 
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingFeatures{};
@@ -297,7 +309,11 @@ bool supportsRayTracing(VkPhysicalDevice device) {
     VkPhysicalDeviceAccelerationStructureFeaturesKHR accelStructFeatures{};
     accelStructFeatures.sType =
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+    VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{};
+    rayQueryFeatures.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
     accelStructFeatures.pNext = &rayTracingFeatures;
+    rayTracingFeatures.pNext = &rayQueryFeatures;
 
     VkPhysicalDeviceFeatures2 features2{};
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
@@ -305,7 +321,7 @@ bool supportsRayTracing(VkPhysicalDevice device) {
     vkGetPhysicalDeviceFeatures2(device, &features2);
 
     if (accelStructFeatures.accelerationStructure &&
-        rayTracingFeatures.rayTracingPipeline) {
+        rayTracingFeatures.rayTracingPipeline && rayQueryFeatures.rayQuery) {
         return true;
     }
     return false;
@@ -353,6 +369,7 @@ VkDevice createLogicalDevice(const PhysicalDeviceInfo &physicalDeviceInfo) {
         deviceExtensions.push_back(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
         deviceExtensions.push_back(
             VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+        deviceExtensions.push_back(VK_KHR_RAY_QUERY_EXTENSION_NAME);
     }
     if (hasDeviceExtension(physicalDeviceInfo.device,
                            VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) {
@@ -380,10 +397,15 @@ VkDevice createLogicalDevice(const PhysicalDeviceInfo &physicalDeviceInfo) {
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingFeatures{};
     rayTracingFeatures.sType =
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
+    VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{};
+    rayQueryFeatures.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
     if (physicalDeviceInfo.hasRayTracing) {
         accelerationFeatures.accelerationStructure = VK_TRUE;
         rayTracingFeatures.rayTracingPipeline = VK_TRUE;
+        rayQueryFeatures.rayQuery = VK_TRUE;
         accelerationFeatures.pNext = &rayTracingFeatures;
+        rayTracingFeatures.pNext = &rayQueryFeatures;
         features13.pNext = &accelerationFeatures;
     }
 
@@ -438,7 +460,7 @@ VkDevice createLogicalDevice(const PhysicalDeviceInfo &physicalDeviceInfo) {
                                  ? static_cast<void *>(&divisorFeatures)
                                  : nullptr;
     if (physicalDeviceInfo.hasRayTracing) {
-        rayTracingFeatures.pNext = optionalFeatures;
+        rayQueryFeatures.pNext = optionalFeatures;
     } else {
         features13.pNext = optionalFeatures;
     }
@@ -471,6 +493,51 @@ VkDevice createLogicalDevice(const PhysicalDeviceInfo &physicalDeviceInfo) {
                                 &device),
                  "Failed to create Vulkan logical device");
     return device;
+}
+
+bool loadRayTracingFunctions(DeviceState &deviceState) {
+    if (!deviceState.physicalDeviceInfo.hasRayTracing ||
+        deviceState.device == VK_NULL_HANDLE) {
+        return false;
+    }
+    auto load = [&](const char *name) {
+        return vkGetDeviceProcAddr(deviceState.device, name);
+    };
+    deviceState.createAccelerationStructure =
+        reinterpret_cast<PFN_vkCreateAccelerationStructureKHR>(
+            load("vkCreateAccelerationStructureKHR"));
+    deviceState.destroyAccelerationStructure =
+        reinterpret_cast<PFN_vkDestroyAccelerationStructureKHR>(
+            load("vkDestroyAccelerationStructureKHR"));
+    deviceState.getAccelerationStructureBuildSizes =
+        reinterpret_cast<PFN_vkGetAccelerationStructureBuildSizesKHR>(
+            load("vkGetAccelerationStructureBuildSizesKHR"));
+    deviceState.buildAccelerationStructures =
+        reinterpret_cast<PFN_vkCmdBuildAccelerationStructuresKHR>(
+            load("vkCmdBuildAccelerationStructuresKHR"));
+    deviceState.getAccelerationStructureDeviceAddress =
+        reinterpret_cast<PFN_vkGetAccelerationStructureDeviceAddressKHR>(
+            load("vkGetAccelerationStructureDeviceAddressKHR"));
+    deviceState.createRayTracingPipelines =
+        reinterpret_cast<PFN_vkCreateRayTracingPipelinesKHR>(
+            load("vkCreateRayTracingPipelinesKHR"));
+    deviceState.getRayTracingShaderGroupHandles =
+        reinterpret_cast<PFN_vkGetRayTracingShaderGroupHandlesKHR>(
+            load("vkGetRayTracingShaderGroupHandlesKHR"));
+    deviceState.traceRays = reinterpret_cast<PFN_vkCmdTraceRaysKHR>(
+        load("vkCmdTraceRaysKHR"));
+    const bool loaded = deviceState.createAccelerationStructure != nullptr &&
+                        deviceState.destroyAccelerationStructure != nullptr &&
+                        deviceState.getAccelerationStructureBuildSizes != nullptr &&
+                        deviceState.buildAccelerationStructures != nullptr &&
+                        deviceState.getAccelerationStructureDeviceAddress != nullptr &&
+                        deviceState.createRayTracingPipelines != nullptr &&
+                        deviceState.getRayTracingShaderGroupHandles != nullptr &&
+                        deviceState.traceRays != nullptr;
+    if (!loaded) {
+        deviceState.physicalDeviceInfo.hasRayTracing = false;
+    }
+    return loaded;
 }
 
 void createQueues(DeviceState &deviceState) {

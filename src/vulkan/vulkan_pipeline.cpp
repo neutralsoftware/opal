@@ -561,7 +561,7 @@ VkPipeline createOrGetRayTracingPipeline(Pipeline *pipeline) {
     info.pGroups = state.rayTracingGroups.data();
     info.maxPipelineRayRecursionDepth = 1;
     info.layout = program.pipelineLayout;
-    VULKAN_GUARD(vkCreateRayTracingPipelinesKHR(
+    VULKAN_GUARD(device.createRayTracingPipelines(
                      device.device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &info,
                      nullptr, &state.rayTracingPipeline),
                  "Failed to create Vulkan ray-tracing pipeline");
@@ -581,7 +581,7 @@ VkPipeline createOrGetRayTracingPipeline(Pipeline *pipeline) {
     uint32_t sbtSize =
         stride * static_cast<uint32_t>(state.rayTracingGroups.size());
     std::vector<uint8_t> handles(sbtSize);
-    VULKAN_GUARD(vkGetRayTracingShaderGroupHandlesKHR(
+    VULKAN_GUARD(device.getRayTracingShaderGroupHandles(
                      device.device, state.rayTracingPipeline, 0,
                      static_cast<uint32_t>(state.rayTracingGroups.size()),
                      handles.size(), handles.data()),

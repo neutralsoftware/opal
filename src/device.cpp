@@ -395,6 +395,56 @@ SDL_Window *Context::makeWindow(int width, int height, const char *title,
     return this->window;
 }
 
+SDL_Window *Context::makeWindowFromNative(void *nativeWindow,
+                                          NativeWindowType nativeWindowType,
+                                          int width, int height,
+                                          const char *title) {
+    if (nativeWindow == nullptr || nativeWindowType == NativeWindowType::None) {
+        throw std::runtime_error("Cannot wrap an empty native window");
+    }
+    SDL_PropertiesID properties = SDL_CreateProperties();
+    if (properties == 0) {
+        throw std::runtime_error("Failed to create SDL window properties");
+    }
+    SDL_SetStringProperty(properties, SDL_PROP_WINDOW_CREATE_TITLE_STRING,
+                          title);
+    SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER,
+                          width);
+    SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER,
+                          height);
+    SDL_SetBooleanProperty(properties,
+                           SDL_PROP_WINDOW_CREATE_EXTERNAL_GRAPHICS_CONTEXT_BOOLEAN,
+                           true);
+#ifdef VULKAN
+    SDL_SetBooleanProperty(properties, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN,
+                           true);
+#endif
+    if (nativeWindowType == NativeWindowType::Win32) {
+        SDL_SetPointerProperty(properties,
+                               SDL_PROP_WINDOW_CREATE_WIN32_HWND_POINTER,
+                               nativeWindow);
+    } else if (nativeWindowType == NativeWindowType::X11) {
+        SDL_SetNumberProperty(
+            properties, SDL_PROP_WINDOW_CREATE_X11_WINDOW_NUMBER,
+            static_cast<Sint64>(reinterpret_cast<uintptr_t>(nativeWindow)));
+    } else if (nativeWindowType == NativeWindowType::Wayland) {
+        SDL_SetPointerProperty(
+            properties, SDL_PROP_WINDOW_CREATE_WAYLAND_WL_SURFACE_POINTER,
+            nativeWindow);
+        SDL_SetBooleanProperty(
+            properties,
+            SDL_PROP_WINDOW_CREATE_WAYLAND_SURFACE_ROLE_CUSTOM_BOOLEAN, true);
+    }
+    this->window = SDL_CreateWindowWithProperties(properties);
+    SDL_DestroyProperties(properties);
+    if (this->window == nullptr) {
+        throw std::runtime_error(std::string("Failed to wrap native window: ") +
+                                 SDL_GetError());
+    }
+    this->ownsWindow = true;
+    return this->window;
+}
+
 SDL_Window *Context::getWindow() const {
     if (this->window == nullptr)
         throw std::runtime_error("Cannot obtain a window before created");
@@ -452,6 +502,18 @@ DeviceInfo Device::getDeviceInfo() {
     info.renderingVersion = "Unknown";
     info.opalVersion = OPAL_VERSION;
     return info;
+#endif
+}
+
+bool Device::supportsRayTracing() const {
+#ifdef METAL
+    auto &state = metal::deviceState(const_cast<Device *>(this));
+    return state.device != nullptr && state.device->supportsRaytracing();
+#elif defined(VULKAN)
+    return vulkan::deviceState(const_cast<Device *>(this))
+        .physicalDeviceInfo.hasRayTracing;
+#else
+    return false;
 #endif
 }
 
@@ -544,6 +606,7 @@ Device::acquire([[maybe_unused]] const std::shared_ptr<Context> &context) {
         vulkanContextState.instance, vulkanContextState.surface);
     vulkanState.device =
         vulkan::createLogicalDevice(vulkanState.physicalDeviceInfo);
+    vulkan::loadRayTracingFunctions(vulkanState);
     vulkan::createQueues(vulkanState);
     vulkan::createPools(vulkanState);
 

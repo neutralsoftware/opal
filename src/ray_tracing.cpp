@@ -409,6 +409,18 @@ namespace {
 
 using namespace opal;
 
+void requireRayTracing(const vulkan::DeviceState &device) {
+    if (!device.physicalDeviceInfo.hasRayTracing ||
+        device.createAccelerationStructure == nullptr ||
+        device.destroyAccelerationStructure == nullptr ||
+        device.getAccelerationStructureBuildSizes == nullptr ||
+        device.buildAccelerationStructures == nullptr ||
+        device.getAccelerationStructureDeviceAddress == nullptr) {
+        throw std::runtime_error(
+            "Vulkan ray tracing is unavailable on this device");
+    }
+}
+
 void createAccelerationBuffer(VkDevice device, VkPhysicalDevice physicalDevice,
                               VkDeviceSize size, VkBufferUsageFlags usage,
                               VkBuffer &buffer, VkDeviceMemory &memory) {
@@ -463,8 +475,9 @@ opal::PrimitiveAccelerationStructure::~PrimitiveAccelerationStructure() {
         return;
     }
     auto &device = vulkan::deviceState(Device::globalInstance);
-    if (accelerationStructure != 0) {
-        vkDestroyAccelerationStructureKHR(
+    if (accelerationStructure != 0 &&
+        device.destroyAccelerationStructure != nullptr) {
+        device.destroyAccelerationStructure(
             device.device,
             vulkan::vulkanHandleFromUint64<VkAccelerationStructureKHR>(
                 accelerationStructure),
@@ -513,6 +526,7 @@ opal::PrimitiveAccelerationStructure::create(
     result->vertexData.reserve(positions.size());
     result->indexData.reserve(indices.size());
     auto &device = vulkan::deviceState(Device::globalInstance);
+    requireRayTracing(device);
     for (size_t index = 0; index < positions.size(); ++index) {
         const auto &geometryPositions = positions[index];
         const auto &geometryIndices = indices[index];
@@ -562,7 +576,7 @@ opal::PrimitiveAccelerationStructure::create(
     buildInfo.pGeometries = geometries.data();
     VkAccelerationStructureBuildSizesInfoKHR sizes{};
     sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
-    vkGetAccelerationStructureBuildSizesKHR(
+    device.getAccelerationStructureBuildSizes(
         device.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
         &buildInfo, primitiveCounts.data(), &sizes);
 
@@ -580,9 +594,9 @@ opal::PrimitiveAccelerationStructure::create(
     accelerationInfo.size = sizes.accelerationStructureSize;
     accelerationInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
     VkAccelerationStructureKHR accelerationStructure = VK_NULL_HANDLE;
-    VULKAN_GUARD(vkCreateAccelerationStructureKHR(device.device,
-                                                  &accelerationInfo, nullptr,
-                                                  &accelerationStructure),
+    VULKAN_GUARD(device.createAccelerationStructure(
+                     device.device, &accelerationInfo, nullptr,
+                     &accelerationStructure),
                  "Failed to create BLAS");
 
     VkBuffer scratchBuffer = VK_NULL_HANDLE;
@@ -609,6 +623,7 @@ void opal::CommandBuffer::buildPrimitiveAccelerationStructure(
         throw std::runtime_error("Invalid Vulkan BLAS");
     }
     auto &device = vulkan::deviceState(Device::globalInstance);
+    requireRayTracing(device);
     auto &state = vulkan::commandBufferState(this);
     if (!state.recording || state.commandBuffer == VK_NULL_HANDLE) {
         throw std::runtime_error(
@@ -659,8 +674,8 @@ void opal::CommandBuffer::buildPrimitiveAccelerationStructure(
     buildInfo.pGeometries = geometries.data();
     const VkAccelerationStructureBuildRangeInfoKHR *rangePointers[] = {
         ranges.data()};
-    vkCmdBuildAccelerationStructuresKHR(state.commandBuffer, 1, &buildInfo,
-                                        rangePointers);
+    device.buildAccelerationStructures(state.commandBuffer, 1, &buildInfo,
+                                       rangePointers);
     blas->isBuilt = true;
 }
 
@@ -669,8 +684,9 @@ opal::InstanceAccelerationStructure::~InstanceAccelerationStructure() {
         return;
     }
     auto &device = vulkan::deviceState(Device::globalInstance);
-    if (accelerationStructure != 0) {
-        vkDestroyAccelerationStructureKHR(
+    if (accelerationStructure != 0 &&
+        device.destroyAccelerationStructure != nullptr) {
+        device.destroyAccelerationStructure(
             device.device,
             vulkan::vulkanHandleFromUint64<VkAccelerationStructureKHR>(
                 accelerationStructure),
@@ -687,6 +703,8 @@ opal::InstanceAccelerationStructure::create(
     if (instances.empty() || Device::globalInstance == nullptr) {
         return nullptr;
     }
+    auto &device = vulkan::deviceState(Device::globalInstance);
+    requireRayTracing(device);
     auto result = std::make_shared<InstanceAccelerationStructure>();
     std::vector<VkAccelerationStructureInstanceKHR> descriptors(
         instances.size());
@@ -713,7 +731,6 @@ opal::InstanceAccelerationStructure::create(
             instance.cullDisable
                 ? VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR
                 : 0;
-        auto &device = vulkan::deviceState(Device::globalInstance);
         VkAccelerationStructureDeviceAddressInfoKHR addressInfo{};
         addressInfo.sType =
             VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
@@ -721,15 +738,14 @@ opal::InstanceAccelerationStructure::create(
             vulkan::vulkanHandleFromUint64<VkAccelerationStructureKHR>(
                 instance.blas->nativeHandle());
         descriptor.accelerationStructureReference =
-            vkGetAccelerationStructureDeviceAddressKHR(device.device,
-                                                       &addressInfo);
+            device.getAccelerationStructureDeviceAddress(device.device,
+                                                         &addressInfo);
     }
     result->instanceData = Buffer::create(
         BufferUsage::GeneralPurpose,
         descriptors.size() * sizeof(VkAccelerationStructureInstanceKHR),
         descriptors.data());
 
-    auto &device = vulkan::deviceState(Device::globalInstance);
     auto &instanceState = vulkan::bufferState(result->instanceData.get());
     VkAccelerationStructureGeometryInstancesDataKHR instanceGeometry{};
     instanceGeometry.sType =
@@ -750,7 +766,7 @@ opal::InstanceAccelerationStructure::create(
     uint32_t primitiveCount = static_cast<uint32_t>(descriptors.size());
     VkAccelerationStructureBuildSizesInfoKHR sizes{};
     sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
-    vkGetAccelerationStructureBuildSizesKHR(
+    device.getAccelerationStructureBuildSizes(
         device.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
         &buildInfo, &primitiveCount, &sizes);
     VkBuffer accelerationBuffer = VK_NULL_HANDLE;
@@ -767,9 +783,9 @@ opal::InstanceAccelerationStructure::create(
     accelerationInfo.size = sizes.accelerationStructureSize;
     accelerationInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
     VkAccelerationStructureKHR accelerationStructure = VK_NULL_HANDLE;
-    VULKAN_GUARD(vkCreateAccelerationStructureKHR(device.device,
-                                                  &accelerationInfo, nullptr,
-                                                  &accelerationStructure),
+    VULKAN_GUARD(device.createAccelerationStructure(
+                     device.device, &accelerationInfo, nullptr,
+                     &accelerationStructure),
                  "Failed to create TLAS");
     VkBuffer scratchBuffer = VK_NULL_HANDLE;
     VkDeviceMemory scratchMemory = VK_NULL_HANDLE;
@@ -805,6 +821,7 @@ void opal::CommandBuffer::buildInstanceAccelerationStructure(
         throw std::runtime_error("Invalid Vulkan TLAS");
     }
     auto &device = vulkan::deviceState(Device::globalInstance);
+    requireRayTracing(device);
     auto &state = vulkan::commandBufferState(this);
     if (!state.recording || state.commandBuffer == VK_NULL_HANDLE) {
         throw std::runtime_error(
@@ -836,8 +853,8 @@ void opal::CommandBuffer::buildInstanceAccelerationStructure(
     VkAccelerationStructureBuildRangeInfoKHR range{};
     range.primitiveCount = static_cast<uint32_t>(tlas->blases.size());
     const VkAccelerationStructureBuildRangeInfoKHR *ranges[] = {&range};
-    vkCmdBuildAccelerationStructuresKHR(state.commandBuffer, 1, &buildInfo,
-                                        ranges);
+    device.buildAccelerationStructures(state.commandBuffer, 1, &buildInfo,
+                                       ranges);
     tlas->isBuilt = true;
 }
 

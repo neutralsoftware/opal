@@ -79,6 +79,8 @@ void setDrawCallback(DrawCallback callback);
  */
 enum class OpenGLProfile { Core, Compatibility };
 
+enum class NativeWindowType { None, Win32, X11, Wayland };
+
 /**
  * @brief Parameters used when creating an Opal `Context`.
  */
@@ -111,6 +113,10 @@ class Context {
 
     SDL_Window *makeWindow(int width, int height, const char *title,
                            SDL_DisplayID displayID = 0);
+    SDL_Window *makeWindowFromNative(void *nativeWindow,
+                                     NativeWindowType nativeWindowType,
+                                     int width, int height,
+                                     const char *title);
     void adoptWindow(SDL_Window *existingWindow, bool takeOwnership = false);
     void setMetalTargetView(void *view);
     void *getMetalTargetView() const;
@@ -192,6 +198,7 @@ class Device {
     std::shared_ptr<Framebuffer> getDefaultFramebuffer();
 
     DeviceInfo getDeviceInfo();
+    bool supportsRayTracing() const;
 #ifdef METAL
     MTL::Device *getMetalDevice() const;
 #endif

@@ -2739,10 +2739,15 @@ void CommandBuffer::dispatchRays(uint width, uint height, uint depth) {
         throw std::runtime_error(
             "Ray-tracing pipeline has no shader-binding table");
     }
-    vkCmdTraceRaysKHR(state.commandBuffer, &pipelineState.raygenRegion,
-                      &pipelineState.missRegion, &pipelineState.hitRegion,
-                      &pipelineState.callableRegion, std::max(width, 1u),
-                      std::max(height, 1u), std::max(depth, 1u));
+    auto &device = vulkan::deviceState(Device::globalInstance);
+    if (device.traceRays == nullptr) {
+        throw std::runtime_error(
+            "Vulkan ray-tracing commands are unavailable");
+    }
+    device.traceRays(state.commandBuffer, &pipelineState.raygenRegion,
+                     &pipelineState.missRegion, &pipelineState.hitRegion,
+                     &pipelineState.callableRegion, std::max(width, 1u),
+                     std::max(height, 1u), std::max(depth, 1u));
 #else
     (void)width;
     (void)height;

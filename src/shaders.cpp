@@ -17,6 +17,8 @@
 #include <functional>
 #include <glad/glad.h>
 #include <memory>
+#include <new>
+#include <stdexcept>
 #include <string.h>
 #include <string>
 #include <utility>
@@ -30,6 +32,19 @@
 #endif
 
 namespace opal {
+
+char *duplicateShaderSource(const char *source) {
+    if (source == nullptr) {
+        return nullptr;
+    }
+    const std::size_t length = std::strlen(source) + 1;
+    auto *copy = static_cast<char *>(std::malloc(length));
+    if (copy == nullptr) {
+        throw std::bad_alloc();
+    }
+    std::memcpy(copy, source, length);
+    return copy;
+}
 
 const char *packedShaderSource(const char *const *parts, std::size_t count) {
     if (parts == nullptr || count == 0) {
@@ -142,14 +157,14 @@ Shader::createFromSource(const char *source, ShaderType type,
     auto shader = std::make_shared<Shader>();
     shader->shaderID = shaderId;
     shader->type = type;
-    shader->source = strdup(source);
+    shader->source = duplicateShaderSource(source);
     return shader;
 
 #elif defined(METAL)
     auto shader = std::make_shared<Shader>();
     shader->shaderID = 0;
     shader->type = type;
-    shader->source = strdup(source);
+    shader->source = duplicateShaderSource(source);
     shader->functionName = entryPoint;
     return shader;
 #elif defined(VULKAN)
@@ -157,7 +172,7 @@ Shader::createFromSource(const char *source, ShaderType type,
 
     shader->shaderID = 0;
     shader->type = type;
-    shader->source = strdup(source);
+    shader->source = duplicateShaderSource(source);
     shader->functionName = entryPoint;
 
     auto &state = vulkan::shaderState(shader.get());
