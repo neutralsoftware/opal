@@ -631,10 +631,8 @@ class Pipeline {
                        int callerId = -1);
     void bindTextureCubemap(const std::string &name, uint textureId, int unit,
                             int callerId = -1);
-#ifdef METAL
     void bindTextureArray(const std::vector<std::shared_ptr<Texture>> &textures,
                           uint32_t bufferIndex);
-#endif
 
     bool multisamplingEnabled = false;
 
@@ -987,6 +985,9 @@ class PrimitiveAccelerationStructure {
     static std::shared_ptr<PrimitiveAccelerationStructure>
     create(const std::vector<float> &positions,
            const std::vector<uint32_t> &indices);
+    static std::shared_ptr<PrimitiveAccelerationStructure>
+    create(const std::vector<std::vector<float>> &positions,
+           const std::vector<std::vector<uint32_t>> &indices);
 
     bool isBuilt = false;
     uint64_t nativeHandle() const { return accelerationStructure; }
@@ -997,12 +998,10 @@ class PrimitiveAccelerationStructure {
     uint64_t accelerationStructure = 0;
     uint64_t accelerationBuffer = 0;
     uint64_t accelerationMemory = 0;
-    uint64_t geometryBuffer = 0;
-    uint64_t indexBuffer = 0;
     uint64_t scratchBuffer = 0;
     uint64_t scratchMemory = 0;
-    std::shared_ptr<Buffer> vertexData;
-    std::shared_ptr<Buffer> indexData;
+    std::vector<std::shared_ptr<Buffer>> vertexData;
+    std::vector<std::shared_ptr<Buffer>> indexData;
 };
 
 class InstanceAccelerationStructure {

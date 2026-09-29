@@ -1792,6 +1792,37 @@ void Pipeline::bindTextureArray(
     state.textureArgumentBufferIndex = bufferIndex;
     state.textureArgumentTextures = textures;
 }
+#elif VULKAN
+void Pipeline::bindTextureArray(
+    const std::vector<std::shared_ptr<Texture>> &textures,
+    uint32_t bufferIndex) {
+    if (shaderProgram == nullptr) {
+        throw std::runtime_error(
+            "bindTextureArray requires a Vulkan shader program");
+    }
+    auto &programState = vulkan::programState(shaderProgram.get());
+    auto bindingIt = std::find_if(
+        programState.bindings.begin(), programState.bindings.end(),
+        [bufferIndex](const vulkan::ShaderBinding &binding) {
+            return binding.set == 0 && binding.binding == bufferIndex;
+        });
+    if (bindingIt == programState.bindings.end() ||
+        (bindingIt->type != vulkan::ShaderResourceType::CombinedImageSampler &&
+         bindingIt->type != vulkan::ShaderResourceType::SampledImage &&
+         bindingIt->type != vulkan::ShaderResourceType::Sampler &&
+         bindingIt->type != vulkan::ShaderResourceType::StorageImage)) {
+        throw std::runtime_error(
+            "Vulkan texture array binding not found or is not an image");
+    }
+    if (textures.size() > bindingIt->count) {
+        throw std::runtime_error("Vulkan texture array is too large");
+    }
+    auto &state = vulkan::pipelineState(this);
+    auto key = vulkan::bindingKey(bindingIt->set, bindingIt->binding);
+    state.boundImages[key].textures = textures;
+    state.boundImages[key].textures.resize(bindingIt->count);
+    state.descriptorsDirty = true;
+}
 #endif
 
 void Pipeline::bindTexture2D(const std::string &name, uint textureId, int unit,

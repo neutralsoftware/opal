@@ -410,13 +410,12 @@ namespace {
 using namespace opal;
 
 void createAccelerationBuffer(VkDevice device, VkPhysicalDevice physicalDevice,
-                              VkDeviceSize size, VkBuffer &buffer,
-                              VkDeviceMemory &memory) {
+                              VkDeviceSize size, VkBufferUsageFlags usage,
+                              VkBuffer &buffer, VkDeviceMemory &memory) {
     VkBufferCreateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = size;
-    bufferInfo.usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
-                       VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    bufferInfo.usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     VULKAN_GUARD(vkCreateBuffer(device, &bufferInfo, nullptr, &buffer),
                  "Failed to create acceleration-structure buffer");
 
@@ -491,8 +490,15 @@ opal::PrimitiveAccelerationStructure::create(
 std::shared_ptr<opal::PrimitiveAccelerationStructure>
 opal::PrimitiveAccelerationStructure::create(
     const std::vector<float> &positions, const std::vector<uint32_t> &indices) {
-    if (positions.size() < 9 || positions.size() % 3 != 0 ||
-        indices.size() < 3 || indices.size() % 3 != 0) {
+    return create(std::vector<std::vector<float>>{positions},
+                  std::vector<std::vector<uint32_t>>{indices});
+}
+
+std::shared_ptr<opal::PrimitiveAccelerationStructure>
+opal::PrimitiveAccelerationStructure::create(
+    const std::vector<std::vector<float>> &positions,
+    const std::vector<std::vector<uint32_t>> &indices) {
+    if (positions.empty() || positions.size() != indices.size()) {
         return nullptr;
     }
     if (Device::globalInstance == nullptr) {
@@ -500,51 +506,73 @@ opal::PrimitiveAccelerationStructure::create(
     }
 
     auto result = std::make_shared<PrimitiveAccelerationStructure>();
-    result->vertexData =
-        Buffer::create(BufferUsage::GeneralPurpose,
-                       positions.size() * sizeof(float), positions.data());
-    result->indexData =
-        Buffer::create(BufferUsage::GeneralPurpose,
-                       indices.size() * sizeof(uint32_t), indices.data());
+    std::vector<VkAccelerationStructureGeometryKHR> geometries;
+    std::vector<uint32_t> primitiveCounts;
+    geometries.reserve(positions.size());
+    primitiveCounts.reserve(positions.size());
+    result->vertexData.reserve(positions.size());
+    result->indexData.reserve(indices.size());
     auto &device = vulkan::deviceState(Device::globalInstance);
-    auto &vertexState = vulkan::bufferState(result->vertexData.get());
-    auto &indexState = vulkan::bufferState(result->indexData.get());
-
-    VkAccelerationStructureGeometryTrianglesDataKHR triangles{};
-    triangles.sType =
-        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
-    triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
-    triangles.vertexData.deviceAddress = vertexState.deviceAddress;
-    triangles.vertexStride = sizeof(float) * 3;
-    triangles.maxVertex = static_cast<uint32_t>(positions.size() / 3 - 1);
-    triangles.indexType = VK_INDEX_TYPE_UINT32;
-    triangles.indexData.deviceAddress = indexState.deviceAddress;
-
-    VkAccelerationStructureGeometryKHR geometry{};
-    geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
-    geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-    geometry.geometry.triangles = triangles;
-    geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+    for (size_t index = 0; index < positions.size(); ++index) {
+        const auto &geometryPositions = positions[index];
+        const auto &geometryIndices = indices[index];
+        if (geometryPositions.size() < 9 || geometryPositions.size() % 3 != 0 ||
+            geometryIndices.size() < 3 || geometryIndices.size() % 3 != 0) {
+            return nullptr;
+        }
+        auto vertexData = Buffer::create(
+            BufferUsage::GeneralPurpose,
+            geometryPositions.size() * sizeof(float), geometryPositions.data());
+        auto indexData = Buffer::create(
+            BufferUsage::GeneralPurpose,
+            geometryIndices.size() * sizeof(uint32_t), geometryIndices.data());
+        if (vertexData == nullptr || indexData == nullptr) {
+            return nullptr;
+        }
+        auto &vertexState = vulkan::bufferState(vertexData.get());
+        auto &indexState = vulkan::bufferState(indexData.get());
+        VkAccelerationStructureGeometryTrianglesDataKHR triangles{};
+        triangles.sType =
+            VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+        triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+        triangles.vertexData.deviceAddress = vertexState.deviceAddress;
+        triangles.vertexStride = sizeof(float) * 3;
+        triangles.maxVertex =
+            static_cast<uint32_t>(geometryPositions.size() / 3 - 1);
+        triangles.indexType = VK_INDEX_TYPE_UINT32;
+        triangles.indexData.deviceAddress = indexState.deviceAddress;
+        VkAccelerationStructureGeometryKHR geometry{};
+        geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+        geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+        geometry.geometry.triangles = triangles;
+        geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+        geometries.push_back(geometry);
+        primitiveCounts.push_back(
+            static_cast<uint32_t>(geometryIndices.size() / 3));
+        result->vertexData.push_back(std::move(vertexData));
+        result->indexData.push_back(std::move(indexData));
+    }
 
     VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
     buildInfo.sType =
         VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
     buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
     buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
-    buildInfo.geometryCount = 1;
-    buildInfo.pGeometries = &geometry;
-    uint32_t primitiveCount = static_cast<uint32_t>(indices.size() / 3);
+    buildInfo.geometryCount = static_cast<uint32_t>(geometries.size());
+    buildInfo.pGeometries = geometries.data();
     VkAccelerationStructureBuildSizesInfoKHR sizes{};
     sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
     vkGetAccelerationStructureBuildSizesKHR(
         device.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
-        &buildInfo, &primitiveCount, &sizes);
+        &buildInfo, primitiveCounts.data(), &sizes);
 
     VkBuffer accelerationBuffer = VK_NULL_HANDLE;
     VkDeviceMemory accelerationMemory = VK_NULL_HANDLE;
-    createAccelerationBuffer(device.device, device.physicalDeviceInfo.device,
-                             sizes.accelerationStructureSize,
-                             accelerationBuffer, accelerationMemory);
+    createAccelerationBuffer(
+        device.device, device.physicalDeviceInfo.device,
+        sizes.accelerationStructureSize,
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+        accelerationBuffer, accelerationMemory);
     VkAccelerationStructureCreateInfoKHR accelerationInfo{};
     accelerationInfo.sType =
         VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
@@ -561,7 +589,7 @@ opal::PrimitiveAccelerationStructure::create(
     VkDeviceMemory scratchMemory = VK_NULL_HANDLE;
     createAccelerationBuffer(device.device, device.physicalDeviceInfo.device,
                              sizes.buildScratchSize, scratchBuffer,
-                             scratchMemory);
+                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, scratchMemory);
     result->accelerationStructure =
         vulkan::vulkanHandleToUint64(accelerationStructure);
     result->accelerationBuffer =
@@ -570,15 +598,14 @@ opal::PrimitiveAccelerationStructure::create(
         vulkan::vulkanHandleToUint64(accelerationMemory);
     result->scratchBuffer = vulkan::vulkanHandleToUint64(scratchBuffer);
     result->scratchMemory = vulkan::vulkanHandleToUint64(scratchMemory);
-    result->geometryBuffer = vulkan::vulkanHandleToUint64(vertexState.buffer);
-    result->indexBuffer = vulkan::vulkanHandleToUint64(indexState.buffer);
     return result;
 }
 
 void opal::CommandBuffer::buildPrimitiveAccelerationStructure(
     const std::shared_ptr<PrimitiveAccelerationStructure> &blas) {
-    if (blas == nullptr || blas->vertexData == nullptr ||
-        blas->indexData == nullptr) {
+    if (blas == nullptr || blas->vertexData.empty() ||
+        blas->indexData.empty() ||
+        blas->vertexData.size() != blas->indexData.size()) {
         throw std::runtime_error("Invalid Vulkan BLAS");
     }
     auto &device = vulkan::deviceState(Device::globalInstance);
@@ -587,23 +614,35 @@ void opal::CommandBuffer::buildPrimitiveAccelerationStructure(
         throw std::runtime_error(
             "BLAS build requires recording Vulkan commands");
     }
-    auto &vertexState = vulkan::bufferState(blas->vertexData.get());
-    auto &indexState = vulkan::bufferState(blas->indexData.get());
-    VkAccelerationStructureGeometryTrianglesDataKHR triangles{};
-    triangles.sType =
-        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
-    triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
-    triangles.vertexData.deviceAddress = vertexState.deviceAddress;
-    triangles.vertexStride = sizeof(float) * 3;
-    triangles.maxVertex =
-        static_cast<uint32_t>(vertexState.size / sizeof(float) / 3 - 1);
-    triangles.indexType = VK_INDEX_TYPE_UINT32;
-    triangles.indexData.deviceAddress = indexState.deviceAddress;
-    VkAccelerationStructureGeometryKHR geometry{};
-    geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
-    geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-    geometry.geometry.triangles = triangles;
-    geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+    std::vector<VkAccelerationStructureGeometryKHR> geometries;
+    std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges;
+    geometries.reserve(blas->vertexData.size());
+    ranges.reserve(blas->vertexData.size());
+    for (size_t index = 0; index < blas->vertexData.size(); ++index) {
+        auto &vertexState = vulkan::bufferState(blas->vertexData[index].get());
+        auto &indexState = vulkan::bufferState(blas->indexData[index].get());
+        VkAccelerationStructureGeometryTrianglesDataKHR triangles{};
+        triangles.sType =
+            VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+        triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+        triangles.vertexData.deviceAddress = vertexState.deviceAddress;
+        triangles.vertexStride = sizeof(float) * 3;
+        triangles.maxVertex =
+            static_cast<uint32_t>(vertexState.size / sizeof(float) / 3 - 1);
+        triangles.indexType = VK_INDEX_TYPE_UINT32;
+        triangles.indexData.deviceAddress = indexState.deviceAddress;
+        VkAccelerationStructureGeometryKHR geometry{};
+        geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+        geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+        geometry.geometry.triangles = triangles;
+        geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+        geometries.push_back(geometry);
+
+        VkAccelerationStructureBuildRangeInfoKHR range{};
+        range.primitiveCount =
+            static_cast<uint32_t>(indexState.size / sizeof(uint32_t) / 3);
+        ranges.push_back(range);
+    }
     VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
     buildInfo.sType =
         VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
@@ -616,14 +655,12 @@ void opal::CommandBuffer::buildPrimitiveAccelerationStructure(
     buildInfo.scratchData.deviceAddress = bufferAddress(
         device.device,
         vulkan::vulkanHandleFromUint64<VkBuffer>(blas->scratchBuffer));
-    buildInfo.geometryCount = 1;
-    buildInfo.pGeometries = &geometry;
-    VkAccelerationStructureBuildRangeInfoKHR range{};
-    range.primitiveCount =
-        static_cast<uint32_t>(indexState.size / sizeof(uint32_t) / 3);
-    const VkAccelerationStructureBuildRangeInfoKHR *ranges[] = {&range};
+    buildInfo.geometryCount = static_cast<uint32_t>(geometries.size());
+    buildInfo.pGeometries = geometries.data();
+    const VkAccelerationStructureBuildRangeInfoKHR *rangePointers[] = {
+        ranges.data()};
     vkCmdBuildAccelerationStructuresKHR(state.commandBuffer, 1, &buildInfo,
-                                        ranges);
+                                        rangePointers);
     blas->isBuilt = true;
 }
 
