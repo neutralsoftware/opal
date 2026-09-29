@@ -473,9 +473,6 @@ void bindVulkanDrawingState(CommandBuffer *commandBuffer,
                                &offset);
 
     } else if (expectsInstanceBuffer) {
-        // Pipelines such as Atlas' object pipeline always declare the
-        // per-instance model matrix and select it with a uniform, so
-        // non-instanced draws still need a valid buffer on that binding.
         auto &device = vulkan::deviceState(Device::globalInstance);
         const VkDeviceSize requiredSize =
             std::max<VkDeviceSize>(pipelineState.vertexBindings[1].stride, 64);

@@ -866,8 +866,6 @@ void opal::CommandBuffer::bindInstanceAccelerationStructure(
             "Vulkan TLAS binding requires a built pipeline and TLAS");
     }
     auto &pipeline = vulkan::pipelineState(boundPipeline.get());
-    // The acceleration structure may live in any descriptor set (Photon's
-    // path tracer declares it in set 3), so resolve the set from reflection.
     uint32_t set = 0;
     if (boundPipeline->shaderProgram != nullptr) {
         const auto &program =

@@ -48,9 +48,6 @@ char *duplicateShaderSource(const char *source) {
 
 #ifdef VULKAN
 namespace {
-// Atlas packs Vulkan shaders as precompiled SPIR-V encoded in hexadecimal.
-// Returns false (leaving `words` untouched) when `source` is not such a blob,
-// in which case it is treated as Slang source.
 bool decodeHexSpirv(const char *source, std::vector<uint32_t> &words) {
     static constexpr char magic[] = "03022307"; // 0x07230203, little endian
     const std::size_t length = std::strlen(source);
@@ -84,8 +81,6 @@ bool decodeHexSpirv(const char *source, std::vector<uint32_t> &words) {
     return true;
 }
 
-// Returns `preferred` if the module declares an entry point with that name,
-// otherwise the first declared entry point (slangc emits "main").
 std::string spirvEntryPointName(const std::vector<uint32_t> &words,
                                 const std::string &preferred) {
     constexpr uint32_t opEntryPoint = 15;

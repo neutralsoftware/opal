@@ -726,9 +726,6 @@ void applyDynamicPipelineState(CommandBuffer *commandBuffer, Pipeline *pipeline,
                           ? static_cast<float>(pipeline->viewportHeight)
                           : static_cast<float>(renderExtent.height);
 
-    // Clamp to the render area like the Metal backend does: callers may pass
-    // the window's viewport while rendering into a smaller (e.g. upscaled)
-    // target, which would otherwise crop the image.
     viewport.x = std::max(0.0f, viewport.x);
     viewport.y = std::max(0.0f, viewport.y);
     viewport.width = std::max(
@@ -1019,11 +1016,6 @@ std::shared_ptr<Texture> fallbackTexture(DeviceState &device,
     return texture;
 }
 
-// Image layout barriers are not allowed inside a dynamic rendering instance.
-// Outside one, transition as usual. Inside one, images that were never used
-// (UNDEFINED) are transitioned through an immediate submission, which is safe
-// because no recorded command references them yet; GENERAL is already valid
-// for sampling. Offscreen attachments are left shader-readable by endPass.
 void prepareImageForDescriptor(CommandBufferState &command,
                                DeviceState &device, TextureState &texture,
                                VkImageLayout &layout) {
@@ -1058,8 +1050,6 @@ void updateDescriptors(CommandBuffer *commandBuffer, Pipeline *pipeline) {
         return;
     }
 
-    // Fresh sets for every bind: the sets bound by earlier draws in this
-    // command buffer must stay untouched until it has executed.
     state.descriptorSets =
         allocateTransientDescriptorSets(command, device, program);
 
@@ -1151,9 +1141,6 @@ void updateDescriptors(CommandBuffer *commandBuffer, Pipeline *pipeline) {
             BoundBufferResource unboundResource;
             if (resourceIt == state.boundBuffers.end() ||
                 resourceIt->second.buffer == nullptr) {
-                // Nothing bound (e.g. an empty light list): point the
-                // descriptor at zeroed memory, which reads as an empty array,
-                // like an unbound buffer on Metal.
                 unboundResource.buffer =
                     fallbackDescriptorBuffer(device, binding.type);
                 unboundResource.range = VK_WHOLE_SIZE;
@@ -1166,9 +1153,6 @@ void updateDescriptors(CommandBuffer *commandBuffer, Pipeline *pipeline) {
                 blockIt != state.uniformBlocks.end() &&
                 !blockIt->second.buffers.empty() &&
                 blockIt->second.buffers[0] == resource.buffer) {
-                // The pipeline's own uniform block: give this draw a private
-                // copy of the current values, since the same pipeline is
-                // usually drawn several times with different uniforms.
                 const auto &block = blockIt->second;
                 const auto allocation = allocateTransientUniform(
                     command, device, block.data.data(), block.data.size());
@@ -1234,8 +1218,6 @@ void updateDescriptors(CommandBuffer *commandBuffer, Pipeline *pipeline) {
         std::shared_ptr<Texture> fallback =
             firstBound != boundTextures.end() ? *firstBound : nullptr;
         if (fallback == nullptr) {
-            // Nothing bound: sampled images get a black texture so the
-            // descriptor is valid; other types are left for the caller.
             if (binding.type != ShaderResourceType::CombinedImageSampler &&
                 binding.type != ShaderResourceType::SampledImage) {
                 continue;
@@ -1318,7 +1300,6 @@ bool updateVulkanBufferData(Pipeline *pipeline, const std::string &name,
         return true;
     }
     if (binding.type == ShaderResourceType::UniformBuffer) {
-        // A whole uniform block written at once.
         auto blockIt = pipelineState.uniformBlocks.find(key);
         if (blockIt == pipelineState.uniformBlocks.end()) {
             return false;

@@ -127,20 +127,12 @@ struct DeviceState {
     PFN_vkCmdTraceRaysKHR traceRays = nullptr;
 
     std::shared_ptr<Texture> defaultDepthTexture;
-    // Zeroed buffer bound to the instance binding of pipelines that declare
-    // per-instance attributes when a draw provides no instance data.
     std::shared_ptr<Buffer> fallbackInstanceBuffer;
-    // 1x1 black textures written to sampled image descriptors that have no
-    // texture bound, keyed by VkImageViewType. Metal reads zeros from
-    // unbound textures; Vulkan requires every used descriptor to be valid.
     std::unordered_map<int, std::shared_ptr<Texture>> fallbackTextures;
-    // Zero-filled buffers written to uniform/storage buffer descriptors that
-    // have nothing bound (e.g. an empty light list).
     std::shared_ptr<Buffer> fallbackUniformBuffer;
     std::shared_ptr<Buffer> fallbackStorageBuffer;
 };
 
-// Host-visible buffer that per-draw uniform data is sub-allocated from.
 struct TransientUniformPage {
     VkBuffer buffer = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -179,11 +171,6 @@ struct CommandBufferState {
 
     uint32_t imageIndex = UINT32_MAX;
 
-    // Descriptor sets and uniform data written while recording. A pipeline is
-    // usually bound for several draws per frame, so every bind gets fresh
-    // descriptor sets and a private copy of its uniform blocks; rewriting a
-    // set that the command buffer already references would invalidate it.
-    // Both are recycled in CommandBuffer::start(), after the fence wait.
     std::vector<VkDescriptorPool> transientDescriptorPools;
     size_t transientDescriptorPoolIndex = 0;
     std::vector<TransientUniformPage> transientUniformPages;
@@ -270,8 +257,6 @@ struct ShaderBinding {
 
     VkShaderStageFlags stages = 0;
 
-    // Dimensionality of image bindings, used to pick a matching fallback
-    // texture when nothing is bound.
     VkImageViewType imageViewType = VK_IMAGE_VIEW_TYPE_2D;
 };
 
@@ -306,8 +291,6 @@ struct ProgramState {
     std::unordered_map<std::string, UniformMember> uniformsByName;
     std::vector<UniformBlockReflection> uniformBlocks;
 
-    // Push constants are reflected like a uniform block that lives in the
-    // pseudo descriptor set kPushConstantSet, so setUniform() reaches them.
     uint32_t pushConstantSize = 0;
     VkShaderStageFlags pushConstantStages = 0;
 
@@ -453,8 +436,6 @@ struct PipelineState {
 
     std::unordered_map<uint64_t, BoundBufferResource> boundBuffers;
 
-    // Bytes supplied through bindBufferData() for whole storage buffers. Each
-    // draw gets its own copy, like setBytes on Metal.
     std::unordered_map<uint64_t, std::vector<uint8_t>> inlineBufferData;
 
     std::unordered_map<uint64_t, BoundImageResource> boundImages;
@@ -536,13 +517,8 @@ void createSwapchainImages(ContextState &contextState,
 void destroySwapchain(ContextState &contextState, DeviceState &deviceState);
 bool recreateSwapchain(Context *context, DeviceState &deviceState);
 
-// Called when a resource is bound by a name the shader program does not
-// reflect. SPIR-V only keeps resources an entry point actually uses, so such
-// bindings are skipped (as on Metal and OpenGL) and reported once per name.
 void reportUnusedBinding(const std::string &name);
 
-// Recycles the per-recording descriptor pools and uniform pages. The caller
-// must guarantee the GPU no longer uses them.
 void resetTransientResources(CommandBufferState &state);
 void destroyTransientResources(CommandBufferState &state);
 
@@ -568,8 +544,6 @@ std::vector<ShaderBinding> reflectShaderBindings(ShaderState &state,
                                                  ProgramState &programState);
 VkDescriptorType descriptorTypeToVk(ShaderResourceType type);
 
-// Descriptor set index used to key the push constant block; it never
-// becomes a real descriptor set.
 inline constexpr uint32_t kPushConstantSet = 0xFFFFFFFFu;
 
 inline uint64_t bindingKey(uint32_t set, uint32_t binding) {
@@ -607,8 +581,6 @@ void createBuffer(DeviceState &deviceState, VkDeviceSize size,
                   VkBuffer &buffer, VkDeviceMemory &memory);
 void ensureDescriptorSets(Pipeline *pipeline);
 void updateDescriptors(CommandBuffer *commandBuffer, Pipeline *pipeline);
-// Handles bindBufferData() for a whole uniform or storage buffer binding.
-// Returns false when `name` is not such a binding.
 bool updateVulkanBufferData(Pipeline *pipeline, const std::string &name,
                             const void *data, size_t size);
 void updateVulkanUniform(Pipeline *pipeline, const std::string &name,

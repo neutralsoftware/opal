@@ -1802,8 +1802,6 @@ void Pipeline::bindTextureArray(
             "bindTextureArray requires a Vulkan shader program");
     }
     auto &programState = vulkan::programState(shaderProgram.get());
-    // Shaders may place the array in any descriptor set (Photon uses sets 1
-    // and 2), so match on the binding index and prefer an actual array.
     auto isImage = [](const vulkan::ShaderBinding &binding) {
         return binding.type == vulkan::ShaderResourceType::CombinedImageSampler ||
                binding.type == vulkan::ShaderResourceType::SampledImage ||

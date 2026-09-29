@@ -1296,8 +1296,6 @@ void CommandBuffer::start() {
     VULKAN_GUARD(vkResetFences(deviceState.device, 1, &state.inFlightFence),
                  "Failed to reset Vulkan in-flight fence");
 
-    // The previous submission has completed, so its descriptor sets and
-    // uniform copies can be reused.
     vulkan::resetTransientResources(state);
 
     VULKAN_GUARD(vkResetCommandBuffer(state.commandBuffer, 0),
@@ -1529,9 +1527,6 @@ void CommandBuffer::beginPass(std::shared_ptr<RenderPass> newRenderPass) {
 
     if (framebuffer->isDefaultFramebuffer) {
         if (!state.imageAcquired) {
-            // Some drivers (e.g. NVIDIA on Windows) keep presenting a stale
-            // swapchain after the window is resized instead of reporting it
-            // out of date, so compare against the surface's current extent.
             VkSurfaceCapabilitiesKHR capabilities{};
             if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
                     deviceState.physicalDeviceInfo.device, contextState.surface,
@@ -1952,9 +1947,6 @@ void CommandBuffer::endPass() {
 
     vkCmdEndRendering(state.commandBuffer);
 
-    // Offscreen attachments are typically sampled by later passes. Image
-    // barriers are not allowed inside a dynamic rendering instance, so move
-    // them to a shader-readable layout now; beginPass transitions them back.
     if (framebuffer != nullptr && !framebuffer->isDefaultFramebuffer) {
         for (const auto &attachment : framebuffer->attachments) {
             if (attachment.texture == nullptr) {

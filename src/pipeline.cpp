@@ -824,7 +824,6 @@ void Pipeline::build() {
         block.size = static_cast<uint32_t>(reflectedBlock.size);
         block.data.resize(reflectedBlock.size, 0);
         if (reflectedBlock.set == vulkan::kPushConstantSet) {
-            // Push constants have no buffer; the data is pushed per draw.
             state.uniformBlocks.emplace(key, std::move(block));
             continue;
         }
@@ -1502,7 +1501,6 @@ void Pipeline::bindBuffer(const std::string &name,
 
     pipelineState.boundBuffers[key] = {
         .buffer = buffer, .offset = 0, .range = VK_WHOLE_SIZE};
-    // An explicit buffer replaces data given through bindBufferData().
     pipelineState.inlineBufferData.erase(key);
 
     pipelineState.descriptorsDirty = true;
