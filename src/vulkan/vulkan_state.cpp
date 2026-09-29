@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <vulkan/vk_platform.h>
 #include <vulkan/vulkan_core.h>
+#include <cstring>
 
 namespace opal::vulkan {
 
