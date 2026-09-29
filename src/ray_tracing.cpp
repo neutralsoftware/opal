@@ -587,9 +587,9 @@ opal::PrimitiveAccelerationStructure::create(
 
     VkBuffer scratchBuffer = VK_NULL_HANDLE;
     VkDeviceMemory scratchMemory = VK_NULL_HANDLE;
-    createAccelerationBuffer(device.device, device.physicalDeviceInfo.device,
-                             sizes.buildScratchSize, scratchBuffer,
-                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, scratchMemory);
+    createAccelerationBuffer(
+        device.device, device.physicalDeviceInfo.device, sizes.buildScratchSize,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, scratchBuffer, scratchMemory);
     result->accelerationStructure =
         vulkan::vulkanHandleToUint64(accelerationStructure);
     result->accelerationBuffer =
@@ -755,9 +755,11 @@ opal::InstanceAccelerationStructure::create(
         &buildInfo, &primitiveCount, &sizes);
     VkBuffer accelerationBuffer = VK_NULL_HANDLE;
     VkDeviceMemory accelerationMemory = VK_NULL_HANDLE;
-    createAccelerationBuffer(device.device, device.physicalDeviceInfo.device,
-                             sizes.accelerationStructureSize,
-                             accelerationBuffer, accelerationMemory);
+    createAccelerationBuffer(
+        device.device, device.physicalDeviceInfo.device,
+        sizes.accelerationStructureSize,
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+        accelerationBuffer, accelerationMemory);
     VkAccelerationStructureCreateInfoKHR accelerationInfo{};
     accelerationInfo.sType =
         VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
@@ -771,9 +773,9 @@ opal::InstanceAccelerationStructure::create(
                  "Failed to create TLAS");
     VkBuffer scratchBuffer = VK_NULL_HANDLE;
     VkDeviceMemory scratchMemory = VK_NULL_HANDLE;
-    createAccelerationBuffer(device.device, device.physicalDeviceInfo.device,
-                             sizes.buildScratchSize, scratchBuffer,
-                             scratchMemory);
+    createAccelerationBuffer(
+        device.device, device.physicalDeviceInfo.device, sizes.buildScratchSize,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, scratchBuffer, scratchMemory);
     result->accelerationStructure =
         vulkan::vulkanHandleToUint64(accelerationStructure);
     result->accelerationBuffer =
