@@ -21,7 +21,6 @@
 #include <stdexcept>
 #include <string.h>
 #include <string>
-#include <stdexcept>
 #include <utility>
 #include <vector>
 #ifdef METAL
@@ -46,6 +45,75 @@ char *duplicateShaderSource(const char *source) {
     std::memcpy(copy, source, length);
     return copy;
 }
+
+#ifdef VULKAN
+namespace {
+// Atlas packs Vulkan shaders as precompiled SPIR-V encoded in hexadecimal.
+// Returns false (leaving `words` untouched) when `source` is not such a blob,
+// in which case it is treated as Slang source.
+bool decodeHexSpirv(const char *source, std::vector<uint32_t> &words) {
+    static constexpr char magic[] = "03022307"; // 0x07230203, little endian
+    const std::size_t length = std::strlen(source);
+    if (length < 40 || length % 8 != 0 ||
+        std::strncmp(source, magic, sizeof(magic) - 1) != 0) {
+        return false;
+    }
+    auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9')
+            return c - '0';
+        if (c >= 'a' && c <= 'f')
+            return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F')
+            return c - 'A' + 10;
+        return -1;
+    };
+    std::vector<uint32_t> decoded(length / 8);
+    for (std::size_t word = 0; word < decoded.size(); ++word) {
+        uint32_t value = 0;
+        for (std::size_t byte = 0; byte < 4; ++byte) {
+            const int high = nibble(source[word * 8 + byte * 2]);
+            const int low = nibble(source[word * 8 + byte * 2 + 1]);
+            if (high < 0 || low < 0) {
+                return false;
+            }
+            value |= static_cast<uint32_t>((high << 4) | low) << (byte * 8);
+        }
+        decoded[word] = value;
+    }
+    words = std::move(decoded);
+    return true;
+}
+
+// Returns `preferred` if the module declares an entry point with that name,
+// otherwise the first declared entry point (slangc emits "main").
+std::string spirvEntryPointName(const std::vector<uint32_t> &words,
+                                const std::string &preferred) {
+    constexpr uint32_t opEntryPoint = 15;
+    std::string first;
+    for (std::size_t index = 5; index < words.size();) {
+        const uint32_t wordCount = words[index] >> 16;
+        const uint32_t opcode = words[index] & 0xFFFFu;
+        if (wordCount == 0 || index + wordCount > words.size()) {
+            break;
+        }
+        if (opcode == opEntryPoint && wordCount > 3) {
+            const char *name =
+                reinterpret_cast<const char *>(&words[index + 3]);
+            const std::size_t maxLength = (wordCount - 3) * sizeof(uint32_t);
+            const std::string entry(name, strnlen(name, maxLength));
+            if (entry == preferred) {
+                return entry;
+            }
+            if (first.empty()) {
+                first = entry;
+            }
+        }
+        index += wordCount;
+    }
+    return first.empty() ? preferred : first;
+}
+} // namespace
+#endif
 
 const char *packedShaderSource(const char *const *parts, std::size_t count) {
     if (parts == nullptr || count == 0) {
@@ -280,7 +348,12 @@ void Shader::compile() {
     state.compiled = false;
     state.log.clear();
     try {
-        state.spirv = vulkan::compileSlangToSPIRV(source, type, functionName);
+        if (decodeHexSpirv(source, state.spirv)) {
+            state.entryPoint = spirvEntryPointName(state.spirv, functionName);
+        } else {
+            state.spirv =
+                vulkan::compileSlangToSPIRV(source, type, functionName);
+        }
     } catch (const std::exception &error) {
         state.log = error.what();
         throw;
@@ -505,6 +578,8 @@ void ShaderProgram::link() {
     state.bindingsByName.clear();
     state.uniformsByName.clear();
     state.uniformBlocks.clear();
+    state.pushConstantSize = 0;
+    state.pushConstantStages = 0;
     state.linked = false;
     state.log.clear();
 
@@ -736,8 +811,14 @@ void ShaderProgram::link() {
     layoutInfo.pSetLayouts = state.descriptorSetLayouts.empty()
                                  ? nullptr
                                  : state.descriptorSetLayouts.data();
-    layoutInfo.pushConstantRangeCount = 0;
-    layoutInfo.pPushConstantRanges = nullptr;
+    VkPushConstantRange pushConstantRange{};
+    pushConstantRange.stageFlags = state.pushConstantStages;
+    pushConstantRange.offset = 0;
+    pushConstantRange.size = state.pushConstantSize;
+    const bool hasPushConstants = state.pushConstantSize > 0;
+    layoutInfo.pushConstantRangeCount = hasPushConstants ? 1 : 0;
+    layoutInfo.pPushConstantRanges =
+        hasPushConstants ? &pushConstantRange : nullptr;
 
     VULKAN_GUARD(vkCreatePipelineLayout(deviceState.device, &layoutInfo,
                                         nullptr, &state.pipelineLayout),

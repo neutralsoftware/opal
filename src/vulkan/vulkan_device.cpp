@@ -363,6 +363,8 @@ VkDevice createLogicalDevice(const PhysicalDeviceInfo &physicalDeviceInfo) {
 
     std::vector<const char *> deviceExtensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    // Ray query is used by compute shaders (e.g. Photon's path tracer) that
+    // trace against acceleration structures outside ray tracing pipelines.
     if (physicalDeviceInfo.hasRayTracing) {
         deviceExtensions.push_back(
             VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
@@ -408,7 +410,6 @@ VkDevice createLogicalDevice(const PhysicalDeviceInfo &physicalDeviceInfo) {
         rayTracingFeatures.pNext = &rayQueryFeatures;
         features13.pNext = &accelerationFeatures;
     }
-
     VkPhysicalDevicePortabilitySubsetFeaturesKHR portabilityFeatures{};
     portabilityFeatures.sType =
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR;
@@ -601,7 +602,11 @@ VkBufferUsageFlags bufferUsageToVk(BufferUsage usage) {
                VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
     case BufferUsage::GeneralPurpose:
-        return VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+        // General-purpose buffers are also bound as vertex/instance streams
+        // (they map to GL_ARRAY_BUFFER on OpenGL).
+        return VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+               VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |

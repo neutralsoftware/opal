@@ -222,6 +222,25 @@ std::vector<ShaderBinding> reflectShaderBindings(ShaderState &state,
             binding.type = type;
             binding.count = descriptorCount(resource);
             binding.stages = state.stage;
+            const auto &resourceType = compiler.get_type(resource.type_id);
+            if (resourceType.basetype == spirv_cross::SPIRType::SampledImage ||
+                resourceType.basetype == spirv_cross::SPIRType::Image) {
+                switch (resourceType.image.dim) {
+                case spv::DimCube:
+                    binding.imageViewType = resourceType.image.arrayed
+                                                ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY
+                                                : VK_IMAGE_VIEW_TYPE_CUBE;
+                    break;
+                case spv::Dim3D:
+                    binding.imageViewType = VK_IMAGE_VIEW_TYPE_3D;
+                    break;
+                default:
+                    binding.imageViewType = resourceType.image.arrayed
+                                                ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
+                                                : VK_IMAGE_VIEW_TYPE_2D;
+                    break;
+                }
+            }
 
             auto existing =
                 std::find_if(bindings.begin(), bindings.end(),
@@ -256,15 +275,34 @@ std::vector<ShaderBinding> reflectShaderBindings(ShaderState &state,
     addResources(resources.acceleration_structures,
                  ShaderResourceType::AccelerationStructure);
 
+    std::vector<std::pair<const spirv_cross::Resource *, bool>> blocks;
     for (const auto &resource : resources.uniform_buffers) {
-        uint32_t set =
-            compiler.has_decoration(resource.id, spv::DecorationDescriptorSet)
-                ? compiler.get_decoration(resource.id,
-                                          spv::DecorationDescriptorSet)
-                : 0;
+        blocks.emplace_back(&resource, false);
+    }
+    for (const auto &resource : resources.push_constant_buffers) {
+        blocks.emplace_back(&resource, true);
+    }
+
+    for (const auto &[resourcePointer, pushConstant] : blocks) {
+        const auto &resource = *resourcePointer;
+        uint32_t set = pushConstant ? kPushConstantSet
+                       : compiler.has_decoration(resource.id,
+                                                 spv::DecorationDescriptorSet)
+                           ? compiler.get_decoration(
+                                 resource.id, spv::DecorationDescriptorSet)
+                           : 0;
         uint32_t binding =
-            compiler.get_decoration(resource.id, spv::DecorationBinding);
+            pushConstant
+                ? 0
+                : compiler.get_decoration(resource.id, spv::DecorationBinding);
         const auto &blockType = compiler.get_type(resource.base_type_id);
+        if (pushConstant) {
+            programState.pushConstantSize = std::max(
+                programState.pushConstantSize,
+                static_cast<uint32_t>(
+                    compiler.get_declared_struct_size(blockType)));
+            programState.pushConstantStages |= state.stage;
+        }
 
         UniformBlockReflection block{};
         block.name = resourceName(resource);

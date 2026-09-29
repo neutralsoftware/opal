@@ -14,7 +14,9 @@
 #include "vulkan_state.h"
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vulkan/vk_platform.h>
 #include <vulkan/vulkan_core.h>
 #include <cstring>
@@ -171,6 +173,49 @@ void releaseContextState(Context *context) {
     states.erase(it);
 }
 
+void reportUnusedBinding(const std::string &name) {
+    static std::unordered_set<std::string> reported;
+    if (reported.insert(name).second) {
+        detail::log(LogLevel::Info,
+                    "Skipping binding not used by the shader: " + name);
+    }
+}
+
+void resetTransientResources(CommandBufferState &state) {
+    for (VkDescriptorPool pool : state.transientDescriptorPools) {
+        vkResetDescriptorPool(state.device, pool, 0);
+    }
+    state.transientDescriptorPoolIndex = 0;
+    for (auto &page : state.transientUniformPages) {
+        page.offset = 0;
+    }
+    state.transientUniformPageIndex = 0;
+}
+
+void destroyTransientResources(CommandBufferState &state) {
+    if (state.device == VK_NULL_HANDLE) {
+        return;
+    }
+    for (VkDescriptorPool pool : state.transientDescriptorPools) {
+        vkDestroyDescriptorPool(state.device, pool, nullptr);
+    }
+    state.transientDescriptorPools.clear();
+    state.transientDescriptorPoolIndex = 0;
+    for (auto &page : state.transientUniformPages) {
+        if (page.mapped != nullptr) {
+            vkUnmapMemory(state.device, page.memory);
+        }
+        if (page.buffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(state.device, page.buffer, nullptr);
+        }
+        if (page.memory != VK_NULL_HANDLE) {
+            vkFreeMemory(state.device, page.memory, nullptr);
+        }
+    }
+    state.transientUniformPages.clear();
+    state.transientUniformPageIndex = 0;
+}
+
 void releaseDeviceState(Device *device) {
     if (device == nullptr) {
         return;
@@ -257,6 +302,7 @@ void releaseDeviceState(Device *device) {
         bufferStatesStorage().clear();
 
         for (auto &[commandBuffer, commandState] : commandStatesStorage()) {
+            destroyTransientResources(commandState);
             if (commandState.imageAvailableSemaphore != VK_NULL_HANDLE) {
                 vkDestroySemaphore(state.device,
                                    commandState.imageAvailableSemaphore,
@@ -310,6 +356,7 @@ void releaseCommandBufferState(CommandBuffer *commandBuffer) {
             vkWaitForFences(state.device, 1, &state.inFlightFence, VK_TRUE,
                             UINT64_MAX);
         }
+        destroyTransientResources(state);
         if (state.imageAvailableSemaphore != VK_NULL_HANDLE) {
             vkDestroySemaphore(state.device, state.imageAvailableSemaphore,
                                nullptr);

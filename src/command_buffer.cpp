@@ -1296,6 +1296,10 @@ void CommandBuffer::start() {
     VULKAN_GUARD(vkResetFences(deviceState.device, 1, &state.inFlightFence),
                  "Failed to reset Vulkan in-flight fence");
 
+    // The previous submission has completed, so its descriptor sets and
+    // uniform copies can be reused.
+    vulkan::resetTransientResources(state);
+
     VULKAN_GUARD(vkResetCommandBuffer(state.commandBuffer, 0),
                  "Failed to reset Vulkan command buffer");
 
@@ -1525,6 +1529,22 @@ void CommandBuffer::beginPass(std::shared_ptr<RenderPass> newRenderPass) {
 
     if (framebuffer->isDefaultFramebuffer) {
         if (!state.imageAcquired) {
+            // Some drivers (e.g. NVIDIA on Windows) keep presenting a stale
+            // swapchain after the window is resized instead of reporting it
+            // out of date, so compare against the surface's current extent.
+            VkSurfaceCapabilitiesKHR capabilities{};
+            if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+                    deviceState.physicalDeviceInfo.device, contextState.surface,
+                    &capabilities) == VK_SUCCESS &&
+                capabilities.currentExtent.width != UINT32_MAX &&
+                capabilities.currentExtent.width > 0 &&
+                capabilities.currentExtent.height > 0 &&
+                (capabilities.currentExtent.width !=
+                     contextState.swapchainExtent.width ||
+                 capabilities.currentExtent.height !=
+                     contextState.swapchainExtent.height)) {
+                vulkan::recreateSwapchain(device->context.get(), deviceState);
+            }
             VkResult result = vkAcquireNextImageKHR(
                 deviceState.device, contextState.swapchain, UINT64_MAX,
                 state.imageAvailableSemaphore, VK_NULL_HANDLE,
@@ -1931,6 +1951,30 @@ void CommandBuffer::endPass() {
     }
 
     vkCmdEndRendering(state.commandBuffer);
+
+    // Offscreen attachments are typically sampled by later passes. Image
+    // barriers are not allowed inside a dynamic rendering instance, so move
+    // them to a shader-readable layout now; beginPass transitions them back.
+    if (framebuffer != nullptr && !framebuffer->isDefaultFramebuffer) {
+        for (const auto &attachment : framebuffer->attachments) {
+            if (attachment.texture == nullptr) {
+                continue;
+            }
+            auto &textureState = vulkan::textureState(attachment.texture.get());
+            if (textureState.layout ==
+                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL ||
+                textureState.layout ==
+                    VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL ||
+                textureState.layout ==
+                    VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL ||
+                textureState.layout ==
+                    VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+                vulkan::transitionTexture(
+                    state.commandBuffer, textureState,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            }
+        }
+    }
 
     if (framebuffer == nullptr || !framebuffer->isDefaultFramebuffer ||
         !state.needsPresent) {

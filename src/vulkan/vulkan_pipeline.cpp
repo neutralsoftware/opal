@@ -672,7 +672,6 @@ void bindPipeline(CommandBuffer *commandBuffer, Pipeline *pipeline,
 
     vkCmdBindPipeline(cmdState.commandBuffer, bindPoint, vkPipeline);
 
-    ensureDescriptorSets(pipeline);
     updateDescriptors(commandBuffer, pipeline);
 
     if (!pipelineState.descriptorSets.empty()) {
@@ -680,6 +679,19 @@ void bindPipeline(CommandBuffer *commandBuffer, Pipeline *pipeline,
             cmdState.commandBuffer, bindPoint, programState.pipelineLayout, 0,
             static_cast<uint32_t>(pipelineState.descriptorSets.size()),
             pipelineState.descriptorSets.data(), 0, nullptr);
+    }
+
+    if (programState.pushConstantSize > 0) {
+        auto pushIt = pipelineState.uniformBlocks.find(
+            bindingKey(kPushConstantSet, 0));
+        if (pushIt != pipelineState.uniformBlocks.end() &&
+            pushIt->second.data.size() >= programState.pushConstantSize) {
+            vkCmdPushConstants(cmdState.commandBuffer,
+                               programState.pipelineLayout,
+                               programState.pushConstantStages, 0,
+                               programState.pushConstantSize,
+                               pushIt->second.data.data());
+        }
     }
 
     cmdState.activePipeline = pipeline;
@@ -713,6 +725,18 @@ void applyDynamicPipelineState(CommandBuffer *commandBuffer, Pipeline *pipeline,
     viewport.height = pipeline->viewportHeight > 0
                           ? static_cast<float>(pipeline->viewportHeight)
                           : static_cast<float>(renderExtent.height);
+
+    // Clamp to the render area like the Metal backend does: callers may pass
+    // the window's viewport while rendering into a smaller (e.g. upscaled)
+    // target, which would otherwise crop the image.
+    viewport.x = std::max(0.0f, viewport.x);
+    viewport.y = std::max(0.0f, viewport.y);
+    viewport.width = std::max(
+        1.0f, std::min(viewport.width,
+                       static_cast<float>(renderExtent.width) - viewport.x));
+    viewport.height = std::max(
+        1.0f, std::min(viewport.height,
+                       static_cast<float>(renderExtent.height) - viewport.y));
 
     viewport.minDepth = 0.0f;
     viewport.maxDepth = 1.0f;
@@ -790,24 +814,254 @@ void ensureDescriptorSets(Pipeline *pipeline) {
     state.descriptorsDirty = true;
 }
 
+namespace {
+
+constexpr uint32_t kTransientDescriptorPoolSets = 512;
+constexpr VkDeviceSize kTransientUniformPageSize = 4ull * 1024ull * 1024ull;
+
+VkDescriptorPool
+createTransientDescriptorPool(const DeviceState &deviceState,
+                              const ProgramState &requiredBy) {
+    const VkDevice device = deviceState.device;
+    std::unordered_map<VkDescriptorType, uint32_t> counts = {
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2048},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2048},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8192},
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2048},
+        {VK_DESCRIPTOR_TYPE_SAMPLER, 1024},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2048},
+    };
+    if (deviceState.physicalDeviceInfo.hasRayTracing) {
+        counts[VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR] = 64;
+    }
+    std::unordered_map<VkDescriptorType, uint32_t> required;
+    for (const auto &binding : requiredBy.bindings) {
+        required[descriptorTypeToVk(binding.type)] += binding.count;
+    }
+    for (const auto &[type, count] : required) {
+        counts[type] = std::max(counts[type], count);
+    }
+
+    std::vector<VkDescriptorPoolSize> poolSizes;
+    poolSizes.reserve(counts.size());
+    for (const auto &[type, count] : counts) {
+        poolSizes.push_back({.type = type, .descriptorCount = count});
+    }
+
+    VkDescriptorPoolCreateInfo poolInfo{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .maxSets = std::max(
+            kTransientDescriptorPoolSets,
+            static_cast<uint32_t>(requiredBy.descriptorSetLayouts.size())),
+        .poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
+        .pPoolSizes = poolSizes.data()};
+
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    VULKAN_GUARD(vkCreateDescriptorPool(device, &poolInfo, nullptr, &pool),
+                 "Failed to create Vulkan descriptor pool");
+    return pool;
+}
+
+std::vector<VkDescriptorSet>
+allocateTransientDescriptorSets(CommandBufferState &command,
+                                const DeviceState &device,
+                                const ProgramState &program) {
+    std::vector<VkDescriptorSet> sets(program.descriptorSetLayouts.size());
+    VkDescriptorSetAllocateInfo allocationInfo{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .pNext = nullptr,
+        .descriptorPool = VK_NULL_HANDLE,
+        .descriptorSetCount = static_cast<uint32_t>(sets.size()),
+        .pSetLayouts = program.descriptorSetLayouts.data()};
+
+    while (true) {
+        bool freshPool = false;
+        if (command.transientDescriptorPoolIndex >=
+            command.transientDescriptorPools.size()) {
+            command.transientDescriptorPools.push_back(
+                createTransientDescriptorPool(device, program));
+            freshPool = true;
+        }
+        allocationInfo.descriptorPool =
+            command.transientDescriptorPools[command
+                                                 .transientDescriptorPoolIndex];
+        const VkResult result = vkAllocateDescriptorSets(
+            command.device, &allocationInfo, sets.data());
+        if (result == VK_SUCCESS) {
+            return sets;
+        }
+        if (freshPool || (result != VK_ERROR_OUT_OF_POOL_MEMORY &&
+                          result != VK_ERROR_FRAGMENTED_POOL)) {
+            VULKAN_GUARD(result, "Failed to allocate Vulkan descriptor sets");
+        }
+        ++command.transientDescriptorPoolIndex;
+    }
+}
+
+struct TransientUniformAllocation {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceSize offset = 0;
+};
+
+TransientUniformPage createTransientUniformPage(const DeviceState &device,
+                                                VkDeviceSize size) {
+    TransientUniformPage page;
+    page.size = size;
+
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = size;
+    bufferInfo.usage =
+        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VULKAN_GUARD(
+        vkCreateBuffer(device.device, &bufferInfo, nullptr, &page.buffer),
+        "Failed to create Vulkan uniform page");
+
+    VkMemoryRequirements requirements{};
+    vkGetBufferMemoryRequirements(device.device, page.buffer, &requirements);
+
+    VkMemoryAllocateInfo allocateInfo{};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocateInfo.allocationSize = requirements.size;
+    allocateInfo.memoryTypeIndex =
+        findMemoryType(device.physicalDeviceInfo.device,
+                       requirements.memoryTypeBits,
+                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    VULKAN_GUARD(
+        vkAllocateMemory(device.device, &allocateInfo, nullptr, &page.memory),
+        "Failed to allocate Vulkan uniform page memory");
+    VULKAN_GUARD(vkBindBufferMemory(device.device, page.buffer, page.memory, 0),
+                 "Failed to bind Vulkan uniform page memory");
+    VULKAN_GUARD(
+        vkMapMemory(device.device, page.memory, 0, size, 0, &page.mapped),
+        "Failed to map Vulkan uniform page");
+    return page;
+}
+
+TransientUniformAllocation
+allocateTransientUniform(CommandBufferState &command,
+                         const DeviceState &device, const void *data,
+                         VkDeviceSize size) {
+    const auto &limits = device.physicalDeviceInfo.properties.limits;
+    const VkDeviceSize alignment = std::max<VkDeviceSize>(
+        {1, limits.minUniformBufferOffsetAlignment,
+         limits.minStorageBufferOffsetAlignment});
+    while (true) {
+        if (command.transientUniformPageIndex >=
+            command.transientUniformPages.size()) {
+            command.transientUniformPages.push_back(createTransientUniformPage(
+                device, std::max(kTransientUniformPageSize, size)));
+        }
+        auto &page =
+            command.transientUniformPages[command.transientUniformPageIndex];
+        const VkDeviceSize offset =
+            (page.offset + alignment - 1) / alignment * alignment;
+        if (offset + size <= page.size) {
+            std::memcpy(static_cast<uint8_t *>(page.mapped) + offset, data,
+                        static_cast<size_t>(size));
+            page.offset = offset + size;
+            return {page.buffer, offset};
+        }
+        ++command.transientUniformPageIndex;
+    }
+}
+
+constexpr size_t kFallbackDescriptorBufferSize = 64 * 1024;
+
+std::shared_ptr<Buffer> fallbackDescriptorBuffer(DeviceState &device,
+                                                 ShaderResourceType type) {
+    const bool uniform = type == ShaderResourceType::UniformBuffer;
+    auto &buffer =
+        uniform ? device.fallbackUniformBuffer : device.fallbackStorageBuffer;
+    if (buffer == nullptr) {
+        const std::vector<std::byte> zeros(kFallbackDescriptorBufferSize);
+        buffer = Buffer::create(uniform ? BufferUsage::UniformBuffer
+                                        : BufferUsage::GeneralPurpose,
+                                zeros.size(), zeros.data(),
+                                MemoryUsageType::CPUToGPU);
+    }
+    return buffer;
+}
+
+std::shared_ptr<Texture> fallbackTexture(DeviceState &device,
+                                         VkImageViewType viewType) {
+    auto existing = device.fallbackTextures.find(viewType);
+    if (existing != device.fallbackTextures.end()) {
+        return existing->second;
+    }
+    static const uint8_t black[4] = {0, 0, 0, 0};
+    std::shared_ptr<Texture> texture;
+    switch (viewType) {
+    case VK_IMAGE_VIEW_TYPE_2D:
+        texture = Texture::create(TextureType::Texture2D, TextureFormat::Rgba8,
+                                  1, 1, TextureDataFormat::Rgba, black);
+        break;
+    case VK_IMAGE_VIEW_TYPE_CUBE:
+        texture = Texture::create(TextureType::TextureCubeMap,
+                                  TextureFormat::Rgba8, 1, 1,
+                                  TextureDataFormat::Rgba, nullptr);
+        for (int face = 0; face < 6; ++face) {
+            texture->updateFace(face, black, 1, 1, TextureDataFormat::Rgba);
+        }
+        break;
+    case VK_IMAGE_VIEW_TYPE_3D:
+        texture = Texture::create3D(TextureFormat::Rgba8, 1, 1, 1,
+                                    TextureDataFormat::Rgba, black);
+        break;
+    default:
+        break;
+    }
+    device.fallbackTextures[viewType] = texture;
+    return texture;
+}
+
+// Image layout barriers are not allowed inside a dynamic rendering instance.
+// Outside one, transition as usual. Inside one, images that were never used
+// (UNDEFINED) are transitioned through an immediate submission, which is safe
+// because no recorded command references them yet; GENERAL is already valid
+// for sampling. Offscreen attachments are left shader-readable by endPass.
+void prepareImageForDescriptor(CommandBufferState &command,
+                               DeviceState &device, TextureState &texture,
+                               VkImageLayout &layout) {
+    if (texture.layout == layout) {
+        return;
+    }
+    if (!command.rendering) {
+        transitionTexture(command.commandBuffer, texture, layout);
+        return;
+    }
+    if (texture.layout == VK_IMAGE_LAYOUT_UNDEFINED) {
+        VkCommandBuffer immediate = beginSingleTimeCommands(device);
+        transitionTexture(immediate, texture, layout);
+        endSingleTimeCommands(device, immediate);
+        return;
+    }
+    if (texture.layout == VK_IMAGE_LAYOUT_GENERAL) {
+        layout = VK_IMAGE_LAYOUT_GENERAL;
+    }
+}
+
+} // namespace
+
 void updateDescriptors(CommandBuffer *commandBuffer, Pipeline *pipeline) {
     auto &state = pipelineState(pipeline);
     auto &program = programState(pipeline->shaderProgram.get());
     auto &device = deviceState(Device::globalInstance);
     auto &command = commandBufferState(commandBuffer);
 
-    for (auto &[key, block] : state.uniformBlocks) {
-        if (!block.dirty || block.buffers.empty() ||
-            block.buffers[0] == nullptr) {
-            continue;
-        }
-        block.buffers[0]->updateData(0, block.data.size(), block.data.data());
-        block.dirty = false;
-    }
-
-    if (!state.descriptorsAllocated) {
+    if (program.descriptorSetLayouts.empty()) {
+        state.descriptorSets.clear();
         return;
     }
+
+    // Fresh sets for every bind: the sets bound by earlier draws in this
+    // command buffer must stay untouched until it has executed.
+    state.descriptorSets =
+        allocateTransientDescriptorSets(command, device, program);
 
     std::vector<VkDescriptorBufferInfo> bufferInfos;
     std::vector<VkDescriptorImageInfo> imageInfos;
@@ -864,14 +1118,79 @@ void updateDescriptors(CommandBuffer *commandBuffer, Pipeline *pipeline) {
 
             continue;
         }
+        if (binding.type == ShaderResourceType::StorageBuffer) {
+            auto inlineIt = state.inlineBufferData.find(key);
+            if (inlineIt != state.inlineBufferData.end() &&
+                !inlineIt->second.empty()) {
+                const auto &bytes = inlineIt->second;
+                const auto allocation = allocateTransientUniform(
+                    command, device, bytes.data(), bytes.size());
+                const size_t firstInfo = bufferInfos.size();
+                for (uint32_t index = 0; index < binding.count; ++index) {
+                    bufferInfos.push_back({.buffer = allocation.buffer,
+                                           .offset = allocation.offset,
+                                           .range = bytes.size()});
+                }
+                writes.push_back(
+                    {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                     .pNext = nullptr,
+                     .dstSet = state.descriptorSets.at(binding.set),
+                     .dstBinding = binding.binding,
+                     .dstArrayElement = 0,
+                     .descriptorCount = binding.count,
+                     .descriptorType = descriptorTypeToVk(binding.type),
+                     .pImageInfo = nullptr,
+                     .pBufferInfo = &bufferInfos[firstInfo],
+                     .pTexelBufferView = nullptr});
+                continue;
+            }
+        }
         if (binding.type == ShaderResourceType::UniformBuffer ||
             binding.type == ShaderResourceType::StorageBuffer) {
             auto resourceIt = state.boundBuffers.find(key);
+            BoundBufferResource unboundResource;
             if (resourceIt == state.boundBuffers.end() ||
                 resourceIt->second.buffer == nullptr) {
+                // Nothing bound (e.g. an empty light list): point the
+                // descriptor at zeroed memory, which reads as an empty array,
+                // like an unbound buffer on Metal.
+                unboundResource.buffer =
+                    fallbackDescriptorBuffer(device, binding.type);
+                unboundResource.range = VK_WHOLE_SIZE;
+            }
+            const BoundBufferResource &resource =
+                unboundResource.buffer != nullptr ? unboundResource
+                                                  : resourceIt->second;
+            auto blockIt = state.uniformBlocks.find(key);
+            if (binding.type == ShaderResourceType::UniformBuffer &&
+                blockIt != state.uniformBlocks.end() &&
+                !blockIt->second.buffers.empty() &&
+                blockIt->second.buffers[0] == resource.buffer) {
+                // The pipeline's own uniform block: give this draw a private
+                // copy of the current values, since the same pipeline is
+                // usually drawn several times with different uniforms.
+                const auto &block = blockIt->second;
+                const auto allocation = allocateTransientUniform(
+                    command, device, block.data.data(), block.data.size());
+                const size_t firstInfo = bufferInfos.size();
+                for (uint32_t index = 0; index < binding.count; ++index) {
+                    bufferInfos.push_back({.buffer = allocation.buffer,
+                                           .offset = allocation.offset,
+                                           .range = block.data.size()});
+                }
+                writes.push_back(
+                    {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                     .pNext = nullptr,
+                     .dstSet = state.descriptorSets.at(binding.set),
+                     .dstBinding = binding.binding,
+                     .dstArrayElement = 0,
+                     .descriptorCount = binding.count,
+                     .descriptorType = descriptorTypeToVk(binding.type),
+                     .pImageInfo = nullptr,
+                     .pBufferInfo = &bufferInfos[firstInfo],
+                     .pTexelBufferView = nullptr});
                 continue;
             }
-            const BoundBufferResource &resource = resourceIt->second;
             auto &buffer = bufferState(resource.buffer.get());
             if (buffer.buffer == VK_NULL_HANDLE ||
                 resource.offset >= buffer.size) {
@@ -902,26 +1221,36 @@ void updateDescriptors(CommandBuffer *commandBuffer, Pipeline *pipeline) {
             continue;
         }
 
+        static const std::vector<std::shared_ptr<Texture>> noTextures;
         auto imageIt = state.boundImages.find(key);
-        if (imageIt == state.boundImages.end() ||
-            imageIt->second.textures.empty()) {
-            continue;
-        }
-        auto fallback = std::find_if(
-            imageIt->second.textures.begin(), imageIt->second.textures.end(),
-            [](const std::shared_ptr<Texture> &texture) {
-                return texture != nullptr;
-            });
-        if (fallback == imageIt->second.textures.end()) {
-            continue;
+        const auto &boundTextures = imageIt != state.boundImages.end()
+                                        ? imageIt->second.textures
+                                        : noTextures;
+        auto firstBound =
+            std::find_if(boundTextures.begin(), boundTextures.end(),
+                         [](const std::shared_ptr<Texture> &texture) {
+                             return texture != nullptr;
+                         });
+        std::shared_ptr<Texture> fallback =
+            firstBound != boundTextures.end() ? *firstBound : nullptr;
+        if (fallback == nullptr) {
+            // Nothing bound: sampled images get a black texture so the
+            // descriptor is valid; other types are left for the caller.
+            if (binding.type != ShaderResourceType::CombinedImageSampler &&
+                binding.type != ShaderResourceType::SampledImage) {
+                continue;
+            }
+            fallback = fallbackTexture(device, binding.imageViewType);
+            if (fallback == nullptr) {
+                continue;
+            }
         }
         const size_t firstInfo = imageInfos.size();
         for (uint32_t index = 0; index < binding.count; ++index) {
             const std::shared_ptr<Texture> &texture =
-                index < imageIt->second.textures.size() &&
-                        imageIt->second.textures[index] != nullptr
-                    ? imageIt->second.textures[index]
-                    : *fallback;
+                index < boundTextures.size() && boundTextures[index] != nullptr
+                    ? boundTextures[index]
+                    : fallback;
             auto &textureState = vulkan::textureState(texture.get());
             const bool usesImage = binding.type != ShaderResourceType::Sampler;
             const bool usesSampler =
@@ -940,7 +1269,8 @@ void updateDescriptors(CommandBuffer *commandBuffer, Pipeline *pipeline) {
                     ? VK_IMAGE_LAYOUT_GENERAL
                     : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             if (usesImage) {
-                transitionTexture(command.commandBuffer, textureState, layout);
+                prepareImageForDescriptor(command, device, textureState,
+                                          layout);
             }
             imageInfos.push_back(
                 {.sampler = usesSampler ? textureState.sampler : VK_NULL_HANDLE,
@@ -968,6 +1298,37 @@ void updateDescriptors(CommandBuffer *commandBuffer, Pipeline *pipeline) {
     }
 
     state.descriptorsDirty = false;
+}
+
+bool updateVulkanBufferData(Pipeline *pipeline, const std::string &name,
+                            const void *data, size_t size) {
+    auto &programState = vulkan::programState(pipeline->shaderProgram.get());
+    auto bindingIt = programState.bindingsByName.find(name);
+    if (bindingIt == programState.bindingsByName.end()) {
+        return false;
+    }
+    const auto &binding = bindingIt->second;
+    auto &pipelineState = vulkan::pipelineState(pipeline);
+    const uint64_t key = vulkan::bindingKey(binding.set, binding.binding);
+    const auto *bytes = static_cast<const uint8_t *>(data);
+
+    if (binding.type == ShaderResourceType::StorageBuffer) {
+        pipelineState.inlineBufferData[key].assign(bytes, bytes + size);
+        pipelineState.descriptorsDirty = true;
+        return true;
+    }
+    if (binding.type == ShaderResourceType::UniformBuffer) {
+        // A whole uniform block written at once.
+        auto blockIt = pipelineState.uniformBlocks.find(key);
+        if (blockIt == pipelineState.uniformBlocks.end()) {
+            return false;
+        }
+        auto &block = blockIt->second;
+        std::memcpy(block.data.data(), bytes, std::min(size, block.data.size()));
+        block.dirty = true;
+        return true;
+    }
+    return false;
 }
 
 void updateVulkanUniform(Pipeline *pipeline, const std::string &name,

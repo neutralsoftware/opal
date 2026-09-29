@@ -7,6 +7,7 @@
 // Copyright (c) 2026 Max Van den Eynde
 //
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -472,8 +473,25 @@ void bindVulkanDrawingState(CommandBuffer *commandBuffer,
                                &offset);
 
     } else if (expectsInstanceBuffer) {
-        throw std::runtime_error("Pipeline expects instance vertex data, "
-                                 "but DrawingState has no instance buffer");
+        // Pipelines such as Atlas' object pipeline always declare the
+        // per-instance model matrix and select it with a uniform, so
+        // non-instanced draws still need a valid buffer on that binding.
+        auto &device = vulkan::deviceState(Device::globalInstance);
+        const VkDeviceSize requiredSize =
+            std::max<VkDeviceSize>(pipelineState.vertexBindings[1].stride, 64);
+        if (device.fallbackInstanceBuffer == nullptr ||
+            vulkan::bufferState(device.fallbackInstanceBuffer.get()).size <
+                requiredSize) {
+            const std::vector<std::byte> zeros(requiredSize);
+            device.fallbackInstanceBuffer = Buffer::create(
+                BufferUsage::GeneralPurpose, zeros.size(), zeros.data(),
+                MemoryUsageType::CPUToGPU);
+        }
+        auto &instance =
+            vulkan::bufferState(device.fallbackInstanceBuffer.get());
+        VkDeviceSize offset = 0;
+        vkCmdBindVertexBuffers(cmd.commandBuffer, 1, 1, &instance.buffer,
+                               &offset);
     }
 }
 

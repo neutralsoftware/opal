@@ -1700,7 +1700,8 @@ void Pipeline::bindTexture(const std::string &name,
     auto &programState = vulkan::programState(shaderProgram.get());
     auto bindingIt = programState.bindingsByName.find(name);
     if (bindingIt == programState.bindingsByName.end()) {
-        throw std::runtime_error("Vulkan texture binding not found: " + name);
+        vulkan::reportUnusedBinding(name);
+        return;
     }
     const auto &binding = bindingIt->second;
     if (binding.type != vulkan::ShaderResourceType::CombinedImageSampler &&
@@ -1801,16 +1802,27 @@ void Pipeline::bindTextureArray(
             "bindTextureArray requires a Vulkan shader program");
     }
     auto &programState = vulkan::programState(shaderProgram.get());
-    auto bindingIt = std::find_if(
-        programState.bindings.begin(), programState.bindings.end(),
-        [bufferIndex](const vulkan::ShaderBinding &binding) {
-            return binding.set == 0 && binding.binding == bufferIndex;
-        });
-    if (bindingIt == programState.bindings.end() ||
-        (bindingIt->type != vulkan::ShaderResourceType::CombinedImageSampler &&
-         bindingIt->type != vulkan::ShaderResourceType::SampledImage &&
-         bindingIt->type != vulkan::ShaderResourceType::Sampler &&
-         bindingIt->type != vulkan::ShaderResourceType::StorageImage)) {
+    // Shaders may place the array in any descriptor set (Photon uses sets 1
+    // and 2), so match on the binding index and prefer an actual array.
+    auto isImage = [](const vulkan::ShaderBinding &binding) {
+        return binding.type == vulkan::ShaderResourceType::CombinedImageSampler ||
+               binding.type == vulkan::ShaderResourceType::SampledImage ||
+               binding.type == vulkan::ShaderResourceType::Sampler ||
+               binding.type == vulkan::ShaderResourceType::StorageImage;
+    };
+    auto bindingIt = programState.bindings.end();
+    for (auto it = programState.bindings.begin();
+         it != programState.bindings.end(); ++it) {
+        if (it->binding != bufferIndex || !isImage(*it)) {
+            continue;
+        }
+        if (bindingIt == programState.bindings.end() ||
+            (it->count > 1 && bindingIt->count <= 1) ||
+            (it->count > 1 && it->set < bindingIt->set)) {
+            bindingIt = it;
+        }
+    }
+    if (bindingIt == programState.bindings.end()) {
         throw std::runtime_error(
             "Vulkan texture array binding not found or is not an image");
     }

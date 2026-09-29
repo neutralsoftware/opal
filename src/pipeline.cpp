@@ -793,6 +793,7 @@ void Pipeline::build() {
     state.descriptorsAllocated = false;
     state.descriptorsDirty = true;
     state.boundBuffers.clear();
+    state.inlineBufferData.clear();
     state.boundImages.clear();
     state.boundAccelerationStructures.clear();
     state.uniformBlocks.clear();
@@ -822,6 +823,11 @@ void Pipeline::build() {
         block.binding = reflectedBlock.binding;
         block.size = static_cast<uint32_t>(reflectedBlock.size);
         block.data.resize(reflectedBlock.size, 0);
+        if (reflectedBlock.set == vulkan::kPushConstantSet) {
+            // Push constants have no buffer; the data is pushed per draw.
+            state.uniformBlocks.emplace(key, std::move(block));
+            continue;
+        }
         auto buffer =
             Buffer::create(BufferUsage::UniformBuffer, reflectedBlock.size,
                            block.data.data(), MemoryUsageType::CPUToGPU);
@@ -1370,7 +1376,9 @@ void Pipeline::bindBufferData(const std::string &name, const void *data,
 #elif defined(METAL)
     updateMetalUniform(this, name, data, size, false);
 #elif defined(VULKAN)
-    vulkan::updateVulkanUniform(this, name, data, size, false);
+    if (!vulkan::updateVulkanBufferData(this, name, data, size)) {
+        vulkan::updateVulkanUniform(this, name, data, size, false);
+    }
 #endif
 }
 
@@ -1450,7 +1458,8 @@ void Pipeline::bindBuffer(const std::string &name,
     auto &programState = vulkan::programState(shaderProgram.get());
     auto bindingIt = programState.bindingsByName.find(name);
     if (bindingIt == programState.bindingsByName.end()) {
-        throw std::runtime_error("Vulkan buffer binding not found: " + name);
+        vulkan::reportUnusedBinding(name);
+        return;
     }
 
     const auto &binding = bindingIt->second;
@@ -1493,6 +1502,8 @@ void Pipeline::bindBuffer(const std::string &name,
 
     pipelineState.boundBuffers[key] = {
         .buffer = buffer, .offset = 0, .range = VK_WHOLE_SIZE};
+    // An explicit buffer replaces data given through bindBufferData().
+    pipelineState.inlineBufferData.erase(key);
 
     pipelineState.descriptorsDirty = true;
 #endif
@@ -1546,8 +1557,8 @@ void Pipeline::bindShaderReadWriteBuffer(const std::string &name,
 
     auto it = programState.bindingsByName.find(name);
     if (it == programState.bindingsByName.end()) {
-        throw std::runtime_error("Vulkan storage buffer binding not found: " +
-                                 name);
+        vulkan::reportUnusedBinding(name);
+        return;
     }
 
     const auto &binding = it->second;
