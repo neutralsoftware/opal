@@ -28,6 +28,7 @@
 
 #ifdef VULKAN
 #include "vulkan_state.h"
+#include <SDL3/SDL_video.h>
 #include <vulkan/vulkan_core.h>
 #endif
 
@@ -1526,15 +1527,32 @@ void CommandBuffer::beginPass(std::shared_ptr<RenderPass> newRenderPass) {
             VkSurfaceCapabilitiesKHR capabilities{};
             if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
                     deviceState.physicalDeviceInfo.device, contextState.surface,
-                    &capabilities) == VK_SUCCESS &&
-                capabilities.currentExtent.width != UINT32_MAX &&
-                capabilities.currentExtent.width > 0 &&
-                capabilities.currentExtent.height > 0 &&
-                (capabilities.currentExtent.width !=
-                     contextState.swapchainExtent.width ||
-                 capabilities.currentExtent.height !=
-                     contextState.swapchainExtent.height)) {
-                vulkan::recreateSwapchain(device->context.get(), deviceState);
+                    &capabilities) == VK_SUCCESS) {
+                VkExtent2D extent = capabilities.currentExtent;
+                if (extent.width == UINT32_MAX) {
+                    int width = 0;
+                    int height = 0;
+                    SDL_GetWindowSizeInPixels(device->context->getWindow(),
+                                             &width, &height);
+                    if (width > 0 && height > 0) {
+                        extent.width = std::clamp(
+                            static_cast<uint32_t>(width),
+                            capabilities.minImageExtent.width,
+                            capabilities.maxImageExtent.width);
+                        extent.height = std::clamp(
+                            static_cast<uint32_t>(height),
+                            capabilities.minImageExtent.height,
+                            capabilities.maxImageExtent.height);
+                    } else {
+                        extent = {};
+                    }
+                }
+                if (extent.width > 0 && extent.height > 0 &&
+                    (extent.width != contextState.swapchainExtent.width ||
+                     extent.height != contextState.swapchainExtent.height)) {
+                    vulkan::recreateSwapchain(device->context.get(),
+                                             deviceState);
+                }
             }
             VkResult result = vkAcquireNextImageKHR(
                 deviceState.device, contextState.swapchain, UINT64_MAX,
