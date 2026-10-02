@@ -1260,16 +1260,12 @@ void CommandBuffer::start() {
     auto &state = vulkan::commandBufferState(this);
     auto &deviceState = vulkan::deviceState(device);
 
-    if (state.imageAvailableSemaphore == VK_NULL_HANDLE ||
-        state.renderFinishedSemaphore == VK_NULL_HANDLE) {
+    if (state.imageAvailableSemaphore == VK_NULL_HANDLE) {
         VkSemaphoreCreateInfo semaphoreInfo{};
         semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
         VULKAN_GUARD(vkCreateSemaphore(deviceState.device, &semaphoreInfo,
                                        nullptr, &state.imageAvailableSemaphore),
                      "Failed to create Vulkan image available semaphore");
-        VULKAN_GUARD(vkCreateSemaphore(deviceState.device, &semaphoreInfo,
-                                       nullptr, &state.renderFinishedSemaphore),
-                     "Failed to create Vulkan render finished semaphore");
     }
 
     if (state.inFlightFence == VK_NULL_HANDLE) {
@@ -2114,7 +2110,10 @@ void CommandBuffer::commit() {
     VkSemaphoreSubmitInfo signalInfo{};
     signalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
 
-    signalInfo.semaphore = state.renderFinishedSemaphore;
+    signalInfo.semaphore = state.needsPresent
+                               ? contextState.renderFinishedSemaphores.at(
+                                     state.imageIndex)
+                               : VK_NULL_HANDLE;
 
     signalInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
 
@@ -2142,7 +2141,7 @@ void CommandBuffer::commit() {
         VkPresentInfoKHR presentInfo{};
         presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
         presentInfo.waitSemaphoreCount = 1;
-        presentInfo.pWaitSemaphores = &state.renderFinishedSemaphore;
+        presentInfo.pWaitSemaphores = &signalInfo.semaphore;
         presentInfo.swapchainCount = 1;
         presentInfo.pSwapchains = &contextState.swapchain;
         presentInfo.pImageIndices = &state.imageIndex;

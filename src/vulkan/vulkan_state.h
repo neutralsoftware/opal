@@ -64,6 +64,7 @@ struct ContextState {
 
     std::vector<VkImage> swapchainImages;
     std::vector<VkImageView> swapchainImageViews;
+    std::vector<VkSemaphore> renderFinishedSemaphores;
 
     uint32_t currentSwapchainImageIndex = UINT32_MAX;
 
@@ -155,7 +156,6 @@ struct CommandBufferState {
     bool submitted = false;
 
     VkSemaphore imageAvailableSemaphore = VK_NULL_HANDLE;
-    VkSemaphore renderFinishedSemaphore = VK_NULL_HANDLE;
     VkFence inFlightFence = VK_NULL_HANDLE;
 
     bool clearColorPending = false;

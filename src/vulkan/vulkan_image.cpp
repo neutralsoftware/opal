@@ -154,10 +154,19 @@ void createSwapchainImages(ContextState &contextState,
                             contextState.swapchainImages.data());
 
     contextState.swapchainImageViews.resize(swapchainImageCount);
+    contextState.renderFinishedSemaphores.resize(swapchainImageCount,
+                                                VK_NULL_HANDLE);
     contextState.swapchainImageLayouts.resize(swapchainImageCount,
                                               VK_IMAGE_LAYOUT_UNDEFINED);
 
     for (size_t i = 0; i < swapchainImageCount; i++) {
+        VkSemaphoreCreateInfo semaphoreInfo{};
+        semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        VULKAN_GUARD(
+            vkCreateSemaphore(deviceState.device, &semaphoreInfo, nullptr,
+                              &contextState.renderFinishedSemaphores[i]),
+            "Failed to create Vulkan presentation semaphore");
+
         VkImageViewCreateInfo viewInfo{};
         viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
         viewInfo.image = contextState.swapchainImages[i];
@@ -190,6 +199,12 @@ void destroySwapchain(ContextState &contextState, DeviceState &deviceState) {
             vkDestroyImageView(deviceState.device, imageView, nullptr);
         }
     }
+    for (VkSemaphore semaphore : contextState.renderFinishedSemaphores) {
+        if (semaphore != VK_NULL_HANDLE) {
+            vkDestroySemaphore(deviceState.device, semaphore, nullptr);
+        }
+    }
+    contextState.renderFinishedSemaphores.clear();
     contextState.swapchainImageViews.clear();
     contextState.swapchainImages.clear();
     contextState.swapchainImageLayouts.clear();
