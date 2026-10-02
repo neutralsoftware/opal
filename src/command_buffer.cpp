@@ -2184,7 +2184,7 @@ void CommandBuffer::waitForSubmittedWork() {
     state.inFlightResources.clear();
 #elif defined(VULKAN)
     auto &state = vulkan::commandBufferState(this);
-    if (state.inFlightFence == VK_NULL_HANDLE) {
+    if (state.inFlightFence == VK_NULL_HANDLE || !state.submitted) {
         return;
     }
 
