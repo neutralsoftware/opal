@@ -308,11 +308,6 @@ void releaseDeviceState(Device *device) {
                                    commandState.imageAvailableSemaphore,
                                    nullptr);
             }
-            if (commandState.renderFinishedSemaphore != VK_NULL_HANDLE) {
-                vkDestroySemaphore(state.device,
-                                   commandState.renderFinishedSemaphore,
-                                   nullptr);
-            }
             if (commandState.inFlightFence != VK_NULL_HANDLE) {
                 vkDestroyFence(state.device, commandState.inFlightFence,
                                nullptr);
@@ -359,10 +354,6 @@ void releaseCommandBufferState(CommandBuffer *commandBuffer) {
         destroyTransientResources(state);
         if (state.imageAvailableSemaphore != VK_NULL_HANDLE) {
             vkDestroySemaphore(state.device, state.imageAvailableSemaphore,
-                               nullptr);
-        }
-        if (state.renderFinishedSemaphore != VK_NULL_HANDLE) {
-            vkDestroySemaphore(state.device, state.renderFinishedSemaphore,
                                nullptr);
         }
         if (state.inFlightFence != VK_NULL_HANDLE) {
