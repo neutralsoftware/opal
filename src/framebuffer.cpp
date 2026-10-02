@@ -574,6 +574,13 @@ void CommandBuffer::performResolve(
         if (srcState.texture == nullptr || dstState.texture == nullptr) {
             return;
         }
+        if (srcState.texture->width() != dstState.texture->width() ||
+            srcState.texture->height() != dstState.texture->height() ||
+            srcState.texture->depth() != dstState.texture->depth() ||
+            srcState.texture->arrayLength() !=
+                dstState.texture->arrayLength()) {
+            return;
+        }
 
         MTL::RenderPassDescriptor *descriptor =
             MTL::RenderPassDescriptor::renderPassDescriptor();
@@ -595,6 +602,17 @@ void CommandBuffer::performResolve(
         auto &srcState = metal::textureState(source.get());
         auto &dstState = metal::textureState(destination.get());
         if (srcState.texture == nullptr || dstState.texture == nullptr) {
+            return;
+        }
+        if (srcState.texture->width() != dstState.texture->width() ||
+            srcState.texture->height() != dstState.texture->height() ||
+            srcState.texture->depth() != dstState.texture->depth() ||
+            srcState.texture->arrayLength() !=
+                dstState.texture->arrayLength() ||
+            srcState.texture->mipmapLevelCount() !=
+                dstState.texture->mipmapLevelCount() ||
+            srcState.texture->pixelFormat() !=
+                dstState.texture->pixelFormat()) {
             return;
         }
         MTL::BlitCommandEncoder *blit = metalCB->blitCommandEncoder();
