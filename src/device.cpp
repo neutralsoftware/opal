@@ -264,10 +264,9 @@ std::shared_ptr<Context> Context::create(ContextConfiguration config) {
     createInfo.ppEnabledExtensionNames = extensions.data();
 
     VkDebugUtilsMessengerCreateInfoEXT debugInfo{};
+    const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
 
     if (validationEnabled) {
-        const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
-
         createInfo.enabledLayerCount = 1;
         createInfo.ppEnabledLayerNames = layers;
 
