@@ -535,11 +535,11 @@ opal::PrimitiveAccelerationStructure::create(
             return nullptr;
         }
         auto vertexData = Buffer::create(
-            BufferUsage::GeneralPurpose,
-            geometryPositions.size() * sizeof(float), geometryPositions.data());
+            BufferUsage::RayTracing, geometryPositions.size() * sizeof(float),
+            geometryPositions.data());
         auto indexData = Buffer::create(
-            BufferUsage::GeneralPurpose,
-            geometryIndices.size() * sizeof(uint32_t), geometryIndices.data());
+            BufferUsage::RayTracing, geometryIndices.size() * sizeof(uint32_t),
+            geometryIndices.data());
         if (vertexData == nullptr || indexData == nullptr) {
             return nullptr;
         }
@@ -742,7 +742,7 @@ opal::InstanceAccelerationStructure::create(
                                                          &addressInfo);
     }
     result->instanceData = Buffer::create(
-        BufferUsage::GeneralPurpose,
+        BufferUsage::RayTracing,
         descriptors.size() * sizeof(VkAccelerationStructureInstanceKHR),
         descriptors.data());
 

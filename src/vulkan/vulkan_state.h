@@ -575,7 +575,8 @@ void bindPipeline(CommandBuffer *commandBuffer, Pipeline *pipeline,
 void applyDynamicPipelineState(CommandBuffer *commandBuffer, Pipeline *pipeline,
                                VkExtent2D renderExtent);
 
-VkBufferUsageFlags bufferUsageToVk(BufferUsage usage);
+VkBufferUsageFlags bufferUsageToVk(BufferUsage usage,
+                                   const DeviceState &deviceState);
 void createBuffer(DeviceState &deviceState, VkDeviceSize size,
                   VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
                   VkBuffer &buffer, VkDeviceMemory &memory);

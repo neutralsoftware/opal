@@ -719,7 +719,8 @@ enum class BufferUsage {
     GeneralPurpose,
     UniformBuffer,
     ShaderRead,
-    ShaderReadWrite
+    ShaderReadWrite,
+    RayTracing
 };
 
 enum class MemoryUsageType { GPUOnly, CPUToGPU, GPUToCPU };

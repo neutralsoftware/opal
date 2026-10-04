@@ -574,7 +574,8 @@ void createPools(DeviceState &deviceState) {
                  "Failed to create compute command pool");
 }
 
-VkBufferUsageFlags bufferUsageToVk(BufferUsage usage) {
+VkBufferUsageFlags bufferUsageToVk(BufferUsage usage,
+                                   const DeviceState &deviceState) {
     switch (usage) {
     case BufferUsage::VertexBuffer:
         return VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
@@ -604,10 +605,24 @@ VkBufferUsageFlags bufferUsageToVk(BufferUsage usage) {
                VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-               VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-               VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-               VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR;
+               VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+    case BufferUsage::RayTracing: {
+        if (!deviceState.physicalDeviceInfo.hasRayTracing) {
+            throw std::runtime_error(
+                "Ray-tracing buffers are unavailable on this Vulkan device");
+        }
+        VkBufferUsageFlags flags = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                                   VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                   VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                   VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        flags |=
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+            VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR;
+        return flags;
+    }
 
     default:
         throw std::runtime_error("Unsupported Vulkan buffer usage");

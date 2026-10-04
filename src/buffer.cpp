@@ -141,7 +141,7 @@ std::shared_ptr<Buffer> Buffer::create(BufferUsage usage, size_t size,
     state.size = std::max<VkDeviceSize>(
         vulkan::vulkanHandleFromUint64<VkDeviceSize>(size), 1);
 
-    state.usageFlags = vulkan::bufferUsageToVk(usage);
+    state.usageFlags = vulkan::bufferUsageToVk(usage, deviceState);
 
     state.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                              VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;

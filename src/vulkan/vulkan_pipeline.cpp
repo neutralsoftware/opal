@@ -587,8 +587,8 @@ VkPipeline createOrGetRayTracingPipeline(Pipeline *pipeline) {
                      handles.size(), handles.data()),
                  "Failed to retrieve Vulkan shader-group handles");
     state.shaderBindingTable =
-        Buffer::create(BufferUsage::GeneralPurpose, handles.size(),
-                       handles.data(), MemoryUsageType::CPUToGPU);
+        Buffer::create(BufferUsage::RayTracing, handles.size(), handles.data(),
+                       MemoryUsageType::CPUToGPU);
     auto &sbtState = bufferState(state.shaderBindingTable.get());
     VkDeviceAddress sbtAddress = sbtState.deviceAddress;
     VkStridedDeviceAddressRegionKHR raygenRegion{
