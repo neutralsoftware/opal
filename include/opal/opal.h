@@ -252,6 +252,11 @@ enum class TextureDataFormat { Rgba, Rgb, Red, Bgr, Bgra, DepthComponent };
 
 class Texture {
   public:
+#ifdef VULKAN
+    static int
+    getSupportedSampleCount(const std::vector<TextureFormat> &formats,
+                            int requestedSamples = 4);
+#endif
     static std::shared_ptr<Texture>
     create(TextureType type, TextureFormat format, int width, int height,
            TextureDataFormat dataFormat = TextureDataFormat::Rgba,

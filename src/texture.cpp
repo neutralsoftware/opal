@@ -719,6 +719,17 @@ void rebuildVulkanSampler(Texture *texture) {
                                     ? deviceState.physicalDeviceInfo.properties
                                           .limits.maxSamplerAnisotropy
                                     : 1.0f;
+    VkFormatProperties formatProperties{};
+    vkGetPhysicalDeviceFormatProperties(deviceState.physicalDeviceInfo.device,
+                                        state.format, &formatProperties);
+    if ((formatProperties.optimalTilingFeatures &
+         VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) == 0) {
+        samplerInfo.magFilter = VK_FILTER_NEAREST;
+        samplerInfo.minFilter = VK_FILTER_NEAREST;
+        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        samplerInfo.anisotropyEnable = VK_FALSE;
+        samplerInfo.maxAnisotropy = 1.0f;
+    }
     samplerInfo.compareEnable = VK_FALSE;
     samplerInfo.minLod = 0.0f;
     samplerInfo.maxLod = static_cast<float>(state.mipLevels);
@@ -753,9 +764,71 @@ void destroyVulkanImage(Texture *texture) {
     state.layout = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
+struct VulkanTextureSupport {
+    TextureFormat format;
+    VkImageUsageFlags usage;
+    VkImageFormatProperties properties;
+};
+
+VulkanTextureSupport
+queryVulkanTextureSupport(const vulkan::DeviceState &deviceState,
+                          TextureType type, TextureFormat requestedFormat) {
+    std::vector<TextureFormat> candidates{requestedFormat};
+    if (requestedFormat == TextureFormat::DepthComponent24) {
+        candidates.push_back(TextureFormat::Depth32F);
+    } else if (requestedFormat == TextureFormat::Depth32F) {
+        candidates.push_back(TextureFormat::DepthComponent24);
+    }
+    for (TextureFormat format : candidates) {
+        VkFormat nativeFormat = vulkan::textureFormatToVkFormat(format);
+        VkFormatProperties properties{};
+        vkGetPhysicalDeviceFormatProperties(
+            deviceState.physicalDeviceInfo.device, nativeFormat, &properties);
+        if ((properties.optimalTilingFeatures &
+             VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) == 0 ||
+            (isDepthTextureFormat(format) &&
+             (properties.optimalTilingFeatures &
+              VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) == 0)) {
+            continue;
+        }
+        VkImageUsageFlags usage = vulkan::textureUsageFlagsFor(type, format);
+        if ((properties.optimalTilingFeatures &
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) == 0) {
+            usage &= ~VK_IMAGE_USAGE_STORAGE_BIT;
+        }
+        if ((properties.optimalTilingFeatures &
+             VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) == 0) {
+            usage &= ~VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        }
+        VkImageFormatProperties imageProperties{};
+        VkResult result = vkGetPhysicalDeviceImageFormatProperties(
+            deviceState.physicalDeviceInfo.device, nativeFormat,
+            vulkan::textureTypeToVk(type), VK_IMAGE_TILING_OPTIMAL, usage,
+            type == TextureType::TextureCubeMap
+                ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT
+                : 0,
+            &imageProperties);
+        if (result == VK_ERROR_FORMAT_NOT_SUPPORTED) {
+            continue;
+        }
+        VULKAN_GUARD(result, "Failed to query Vulkan texture capabilities");
+        return {format, usage, imageProperties};
+    }
+    throw std::runtime_error("Vulkan GPU does not support texture format " +
+                             std::to_string(static_cast<int>(requestedFormat)) +
+                             " with the required image usage");
+}
+
 void createVulkanImage(Texture *texture, int depth) {
     auto &deviceState = vulkan::deviceState(Device::globalInstance);
     auto &state = vulkan::textureState(texture);
+    const auto support =
+        queryVulkanTextureSupport(deviceState, texture->type, texture->format);
+    if (support.format != texture->format) {
+        detail::log(LogLevel::Warning,
+                    "Using a supported Vulkan depth format for the viewport");
+        texture->format = support.format;
+    }
     destroyVulkanImage(texture);
 
     state.width = static_cast<uint32_t>(std::max(texture->width, 1));
@@ -769,15 +842,18 @@ void createVulkanImage(Texture *texture, int depth) {
     state.opalFormat = texture->format;
     state.type = texture->type;
 
-    VkSampleCountFlags supportedSamples =
-        isDepthTextureFormat(texture->format)
-            ? deviceState.physicalDeviceInfo.properties.limits
-                  .framebufferDepthSampleCounts
-            : deviceState.physicalDeviceInfo.properties.limits
-                  .framebufferColorSampleCounts;
-    if ((supportedSamples & state.sampleCount) == 0) {
+    if ((support.properties.sampleCounts & state.sampleCount) == 0) {
+        throw std::runtime_error("Vulkan texture format does not support the "
+                                 "requested sample count: " +
+                                 std::to_string(texture->samples));
+    }
+    if (state.width > support.properties.maxExtent.width ||
+        state.height > support.properties.maxExtent.height ||
+        state.depth > support.properties.maxExtent.depth ||
+        state.mipLevels > support.properties.maxMipLevels ||
+        state.arrayLayers > support.properties.maxArrayLayers) {
         throw std::runtime_error(
-            "Requested Vulkan texture sample count is unsupported");
+            "Vulkan texture exceeds the GPU's image limits");
     }
 
     VkImageCreateInfo imageInfo{};
@@ -792,24 +868,7 @@ void createVulkanImage(Texture *texture, int depth) {
     imageInfo.arrayLayers = state.arrayLayers;
     imageInfo.samples = state.sampleCount;
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.usage =
-        vulkan::textureUsageFlagsFor(texture->type, texture->format);
-    VkFormatProperties formatProperties{};
-    vkGetPhysicalDeviceFormatProperties(deviceState.physicalDeviceInfo.device,
-                                        state.format, &formatProperties);
-    if ((formatProperties.optimalTilingFeatures &
-         VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) == 0) {
-        imageInfo.usage &= ~VK_IMAGE_USAGE_STORAGE_BIT;
-    }
-    if ((formatProperties.optimalTilingFeatures &
-         VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) == 0) {
-        imageInfo.usage &= ~VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    }
-    if ((formatProperties.optimalTilingFeatures &
-         VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) == 0) {
-        throw std::runtime_error(
-            "Vulkan texture format does not support sampled images");
-    }
+    imageInfo.usage = support.usage;
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VULKAN_GUARD(
@@ -1011,6 +1070,37 @@ void readVulkanTexture(Texture *texture, void *output,
 #endif
 
 } // namespace
+
+#ifdef VULKAN
+int Texture::getSupportedSampleCount(const std::vector<TextureFormat> &formats,
+                                     int requestedSamples) {
+    if (Device::globalInstance == nullptr || formats.empty()) {
+        throw std::runtime_error(
+            "Cannot query Vulkan samples without a device and formats");
+    }
+    const auto &deviceState = vulkan::deviceState(Device::globalInstance);
+    VkSampleCountFlags supported = ~VkSampleCountFlags{0};
+    for (TextureFormat format : formats) {
+        const auto support = queryVulkanTextureSupport(
+            deviceState, TextureType::Texture2DMultisample, format);
+        if ((support.usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                              VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) ==
+            0) {
+            throw std::runtime_error(
+                "Vulkan render target format is not renderable");
+        }
+        supported &= support.properties.sampleCounts;
+    }
+    for (int samples = 64; samples >= 1; samples /= 2) {
+        if (samples <= requestedSamples &&
+            (supported & vulkan::sampleCountFlagBitsFor(samples)) != 0) {
+            return samples;
+        }
+    }
+    throw std::runtime_error(
+        "Vulkan render target formats have no common sample count");
+}
+#endif
 
 std::shared_ptr<Texture> Texture::create(TextureType type, TextureFormat format,
                                          int width, int height,
