@@ -770,8 +770,18 @@ void ShaderProgram::link() {
         maxSet = std::max(maxSet, binding.set);
     }
 
+    const auto &limits = deviceState.physicalDeviceInfo.properties.limits;
+    const size_t setCount = state.bindings.empty() ? 0 : size_t{maxSet} + 1;
+    if (setCount > limits.maxBoundDescriptorSets) {
+        throw std::runtime_error("Vulkan shader requires more descriptor sets "
+                                 "than this GPU supports");
+    }
+    if (state.pushConstantSize > limits.maxPushConstantsSize) {
+        throw std::runtime_error(
+            "Vulkan shader push constants exceed this GPU's supported size");
+    }
     std::vector<std::vector<VkDescriptorSetLayoutBinding>> bindingsPerSet(
-        state.bindings.empty() ? 0 : maxSet + 1);
+        setCount);
 
     for (const auto &binding : state.bindings) {
         VkDescriptorSetLayoutBinding vkBinding{};

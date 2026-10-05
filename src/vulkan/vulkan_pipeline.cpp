@@ -358,6 +358,11 @@ VkPipeline createOrGetGraphicsPipeline(Pipeline *pipeline,
 
     auto &program = programState(pipeline->shaderProgram.get());
     auto &device = deviceState(Device::globalInstance);
+    if (target.colorFormats.size() >
+        device.physicalDeviceInfo.properties.limits.maxColorAttachments) {
+        throw std::runtime_error(
+            "Vulkan render target exceeds this GPU's color attachment limit");
+    }
 
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType =
