@@ -1328,6 +1328,20 @@ void CommandBuffer::beginPass(std::shared_ptr<RenderPass> newRenderPass) {
             "Render pass must have a framebuffer before beginPass");
     }
 
+#ifdef VULKAN
+    auto &state = vulkan::commandBufferState(this);
+    if (!state.recording) {
+        throw std::runtime_error(
+            "Vulkan command buffer is not recording before beginPass");
+    }
+    if (!newRenderPass->framebuffer->getStatus()) {
+        throw std::runtime_error("Cannot begin an incomplete Vulkan framebuffer");
+    }
+    if (state.rendering) {
+        endPass();
+    }
+#endif
+
     renderPass = std::move(newRenderPass);
     framebuffer = renderPass->framebuffer;
 
@@ -1457,18 +1471,8 @@ void CommandBuffer::beginPass(std::shared_ptr<RenderPass> newRenderPass) {
     state.clearColorPending = false;
     state.clearDepthPending = false;
 #elif VULKAN
-    auto &state = vulkan::commandBufferState(this);
     auto &deviceState = vulkan::deviceState(device);
     auto &contextState = vulkan::contextState(device->context.get());
-
-    if (!state.recording) {
-        throw std::runtime_error(
-            "Vulkan command buffer is not recording before beginPass");
-    }
-
-    if (state.rendering) {
-        endPass();
-    }
 
     auto transitionImage =
         [&](vulkan::TextureState &textureState, VkImageLayout newLayout,

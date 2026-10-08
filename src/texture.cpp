@@ -869,6 +869,7 @@ void createVulkanImage(Texture *texture, int depth) {
     imageInfo.samples = state.sampleCount;
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
     imageInfo.usage = support.usage;
+    state.usage = support.usage;
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VULKAN_GUARD(

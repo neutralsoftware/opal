@@ -197,6 +197,7 @@ struct TextureState {
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     VkImageAspectFlags aspectMask = 0;
+    VkImageUsageFlags usage = 0;
 
     VkSampleCountFlagBits sampleCount = VK_SAMPLE_COUNT_1_BIT;
 

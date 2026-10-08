@@ -370,6 +370,13 @@ bool Framebuffer::getStatus() const {
             state.imageView == VK_NULL_HANDLE) {
             return false;
         }
+        const VkImageUsageFlags requiredUsage =
+            attachment.type == Attachment::Type::Color
+                ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+                : VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        if ((state.usage & requiredUsage) == 0) {
+            return false;
+        }
     }
     return true;
 #else
