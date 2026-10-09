@@ -1085,6 +1085,8 @@ void updateDescriptors(CommandBuffer *commandBuffer, Pipeline *pipeline) {
                 continue;
             }
 
+            command.retain(accelerationIt->second);
+
             accelerationHandles.push_back(
                 reinterpret_cast<VkAccelerationStructureKHR>(
                     static_cast<uintptr_t>(
@@ -1180,6 +1182,7 @@ void updateDescriptors(CommandBuffer *commandBuffer, Pipeline *pipeline) {
                      .pTexelBufferView = nullptr});
                 continue;
             }
+            command.retain(resource.buffer);
             auto &buffer = bufferState(resource.buffer.get());
             if (buffer.buffer == VK_NULL_HANDLE ||
                 resource.offset >= buffer.size) {
@@ -1189,6 +1192,10 @@ void updateDescriptors(CommandBuffer *commandBuffer, Pipeline *pipeline) {
             VkDeviceSize range = resource.range;
             if (range == VK_WHOLE_SIZE) {
                 range = buffer.size - resource.offset;
+            }
+            if (range == 0 || range > buffer.size - resource.offset) {
+                throw std::runtime_error(
+                    "Vulkan buffer descriptor exceeds its allocation");
             }
             const size_t firstInfo = bufferInfos.size();
             for (uint32_t index = 0; index < binding.count; ++index) {
@@ -1238,6 +1245,7 @@ void updateDescriptors(CommandBuffer *commandBuffer, Pipeline *pipeline) {
                 index < boundTextures.size() && boundTextures[index] != nullptr
                     ? boundTextures[index]
                     : fallback;
+            command.retain(texture);
             auto &textureState = vulkan::textureState(texture.get());
             const bool usesImage = binding.type != ShaderResourceType::Sampler;
             const bool usesSampler =

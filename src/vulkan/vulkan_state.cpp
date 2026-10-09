@@ -229,6 +229,10 @@ void releaseDeviceState(Device *device) {
     if (state.device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(state.device);
 
+        for (auto &[commandBuffer, commandState] : commandStatesStorage()) {
+            commandState.retainedResources.clear();
+        }
+
         for (auto &[pipeline, pipelineState] : pipelineStatesStorage()) {
             for (auto &[signature, handle] : pipelineState.graphicsPipelines) {
                 if (handle != VK_NULL_HANDLE) {

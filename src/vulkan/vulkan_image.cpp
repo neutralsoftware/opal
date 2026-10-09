@@ -460,6 +460,9 @@ void bindVulkanDrawingState(CommandBuffer *commandBuffer,
     }
 
     auto &cmd = vulkan::commandBufferState(commandBuffer);
+    cmd.retain(drawingState->vertexBuffer);
+    cmd.retain(drawingState->instanceBuffer);
+    cmd.retain(drawingState->indexBuffer);
 
     if (drawingState->vertexBuffer != nullptr) {
         auto &vertex = vulkan::bufferState(drawingState->vertexBuffer.get());
@@ -499,6 +502,7 @@ void bindVulkanDrawingState(CommandBuffer *commandBuffer,
                 BufferUsage::GeneralPurpose, zeros.size(), zeros.data(),
                 MemoryUsageType::CPUToGPU);
         }
+        cmd.retain(device.fallbackInstanceBuffer);
         auto &instance =
             vulkan::bufferState(device.fallbackInstanceBuffer.get());
         VkDeviceSize offset = 0;

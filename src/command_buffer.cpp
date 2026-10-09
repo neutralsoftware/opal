@@ -1293,6 +1293,7 @@ void CommandBuffer::start() {
     VULKAN_GUARD(vkResetFences(deviceState.device, 1, &state.inFlightFence),
                  "Failed to reset Vulkan in-flight fence");
 
+    state.retainedResources.clear();
     vulkan::resetTransientResources(state);
 
     VULKAN_GUARD(vkResetCommandBuffer(state.commandBuffer, 0),
@@ -1344,6 +1345,12 @@ void CommandBuffer::beginPass(std::shared_ptr<RenderPass> newRenderPass) {
 
     renderPass = std::move(newRenderPass);
     framebuffer = renderPass->framebuffer;
+
+#ifdef VULKAN
+    for (const auto &attachment : framebuffer->attachments) {
+        state.retain(attachment.texture);
+    }
+#endif
 
 #ifdef OPENGL
     framebuffer->bind();
@@ -2229,6 +2236,8 @@ void CommandBuffer::bindPipeline(const std::shared_ptr<Pipeline> &pipeline) {
 #ifdef VULKAN
     auto &state = vulkan::commandBufferState(this);
 
+    state.retain(pipeline);
+    state.retain(pipeline->shaderProgram);
     state.activePipeline = pipeline.get();
 #endif
 }
@@ -2801,6 +2810,7 @@ void CommandBuffer::dispatchRays(uint width, uint height, uint depth) {
         throw std::runtime_error(
             "Vulkan ray-tracing commands are unavailable");
     }
+    state.retain(pipelineState.shaderBindingTable);
     device.traceRays(state.commandBuffer, &pipelineState.raygenRegion,
                      &pipelineState.missRegion, &pipelineState.hitRegion,
                      &pipelineState.callableRegion, std::max(width, 1u),
@@ -2876,6 +2886,7 @@ void CommandBuffer::generateMipmaps(const std::shared_ptr<Texture> &texture) {
     blitEncoder->endEncoding();
 #elif defined(VULKAN)
     auto &cmd = vulkan::commandBufferState(this);
+    cmd.retain(texture);
     auto &tex = vulkan::textureState(texture.get());
 
     if (tex.mipLevels <= 1) {

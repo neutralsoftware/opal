@@ -16,6 +16,7 @@
 
 #include <cwchar>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 #ifdef VULKAN
 
@@ -170,6 +171,14 @@ struct CommandBufferState {
         VK_PIPELINE_BIND_POINT_GRAPHICS;
 
     uint32_t imageIndex = UINT32_MAX;
+
+    std::unordered_map<const void *, std::shared_ptr<void>> retainedResources;
+
+    template <typename T> void retain(const std::shared_ptr<T> &resource) {
+        if (resource != nullptr) {
+            retainedResources.try_emplace(resource.get(), resource);
+        }
+    }
 
     std::vector<VkDescriptorPool> transientDescriptorPools;
     size_t transientDescriptorPoolIndex = 0;

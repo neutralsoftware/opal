@@ -681,6 +681,8 @@ void CommandBuffer::performResolve(
 
     auto copyTexture = [&](const std::shared_ptr<Texture> &source,
                            const std::shared_ptr<Texture> &destination) {
+        command.retain(source);
+        command.retain(destination);
         auto &sourceState = vulkan::textureState(source.get());
         auto &destinationState = vulkan::textureState(destination.get());
         if (sourceState.sampleCount != destinationState.sampleCount ||
@@ -688,8 +690,14 @@ void CommandBuffer::performResolve(
             throw std::runtime_error(
                 "Vulkan texture copy requires matching formats and samples");
         }
-        VkImageLayout sourceLayout = sourceState.layout;
-        VkImageLayout destinationLayout = destinationState.layout;
+        VkImageLayout sourceLayout =
+            sourceState.layout == VK_IMAGE_LAYOUT_UNDEFINED
+                ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                : sourceState.layout;
+        VkImageLayout destinationLayout =
+            destinationState.layout == VK_IMAGE_LAYOUT_UNDEFINED
+                ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                : destinationState.layout;
         vulkan::transitionTexture(command.commandBuffer, sourceState,
                                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         vulkan::transitionTexture(command.commandBuffer, destinationState,
@@ -715,6 +723,8 @@ void CommandBuffer::performResolve(
     auto resolveTexture = [&](const std::shared_ptr<Texture> &source,
                               const std::shared_ptr<Texture> &destination,
                               bool depth) {
+        command.retain(source);
+        command.retain(destination);
         auto &sourceState = vulkan::textureState(source.get());
         auto &destinationState = vulkan::textureState(destination.get());
         if (sourceState.sampleCount == VK_SAMPLE_COUNT_1_BIT ||
@@ -723,8 +733,14 @@ void CommandBuffer::performResolve(
             throw std::runtime_error("Vulkan resolve requires matching "
                                      "multisample and single-sample textures");
         }
-        VkImageLayout sourceLayout = sourceState.layout;
-        VkImageLayout destinationLayout = destinationState.layout;
+        VkImageLayout sourceLayout =
+            sourceState.layout == VK_IMAGE_LAYOUT_UNDEFINED
+                ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                : sourceState.layout;
+        VkImageLayout destinationLayout =
+            destinationState.layout == VK_IMAGE_LAYOUT_UNDEFINED
+                ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                : destinationState.layout;
         VkImageLayout attachmentLayout =
             depth ? VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL
                   : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
