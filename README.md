@@ -2,6 +2,10 @@
 
 Opal is a C++20 rendering abstraction library with Metal, Vulkan, and OpenGL backends. It provides contexts, devices, command buffers, shaders, pipelines, textures, framebuffers, buffers, compute dispatch, and ray-tracing support.
 
+## Documentation and examples
+
+Start with the [getting-started guide](docs/getting-started.md), browse the [complete API reference](docs/api-reference.md), or run the [examples](examples/README.md). The [documentation index](docs/README.md) also links rendering recipes and backend limitations.
+
 ## Add Opal to a CMake project
 
 ### Git submodule
@@ -28,7 +32,7 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/neutralsoftware/opal.git
     GIT_TAG main
 
-    GIT_SUBMODULES third_party/slang
+    GIT_SUBMODULES third-party/slang
     GIT_SUBMODULES_RECURSE TRUE
 )
 
@@ -55,25 +59,11 @@ Applications do not need to include Metal headers or list Apple frameworks thems
 
 GLM and SDL3 are reused when the parent project already provides their CMake targets. Otherwise, Opal downloads its pinned versions during configuration.
 
-## Minimal setup
+## First window
 
-```cpp
-#include <opal/opal.h>
+The complete [clear-window example](examples/clear.cpp) handles SDL events, render passes, submission, presentation, and cleanup. The [indexed-triangle example](examples/triangle.cpp) adds shaders, buffers, and pipeline setup; the [compute example](examples/compute.cpp) demonstrates Metal/Vulkan dispatch.
 
-int main() {
-    opal::ContextConfiguration configuration;
-    configuration.applicationName = "Opal Application";
-
-    auto context = opal::Context::create(configuration);
-    context->makeWindow(1280, 720, "Opal Application");
-
-    auto device = opal::Device::acquire(context);
-    auto commandBuffer = device->acquireCommandBuffer();
-
-    commandBuffer->start();
-    device->submitCommandBuffer(commandBuffer);
-}
-```
+Use `CommandBuffer::commit()` to submit Metal/Vulkan work. `Device::submitCommandBuffer()` is currently empty. OpenGL applications present with `SDL_GL_SwapWindow()`.
 
 ## Logging
 
