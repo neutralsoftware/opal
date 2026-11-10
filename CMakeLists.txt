@@ -198,3 +198,9 @@ elseif(OPAL_RESOLVED_BACKEND STREQUAL "OPENGL")
 else()
     message(FATAL_ERROR "Invalid OPAL_BACKEND=${OPAL_BACKEND}")
 endif()
+
+option(OPAL_BUILD_C_ABI "Build the C ABI for Opal" OFF)
+
+if(OPAL_BUILD_C_ABI)
+    add_subdirectory(abi)
+endif()
