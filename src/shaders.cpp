@@ -400,12 +400,17 @@ bool Shader::getShaderStatus() const {
 }
 
 void Shader::getShaderLog(char *logBuffer, size_t bufferSize) const {
+    detail::require(
+        logBuffer != nullptr && bufferSize > 0,
+        "Shader log retrieval requires an output buffer and positive capacity");
+    logBuffer[0] = '\0';
 #ifdef OPENGL
     glGetShaderInfoLog(shaderID, static_cast<GLsizei>(bufferSize), nullptr,
                        logBuffer);
 #elif defined(METAL)
     strncpy(logBuffer, "Metal shader compile status available via exceptions.",
-            bufferSize);
+            bufferSize - 1);
+    logBuffer[bufferSize - 1] = '\0';
 #elif defined(VULKAN)
     if (logBuffer == nullptr || bufferSize == 0) {
         return;
@@ -861,12 +866,17 @@ bool ShaderProgram::getProgramStatus() const {
 }
 
 void ShaderProgram::getProgramLog(char *logBuffer, size_t bufferSize) const {
+    detail::require(
+        logBuffer != nullptr && bufferSize > 0,
+        "Shader log retrieval requires an output buffer and positive capacity");
+    logBuffer[0] = '\0';
 #ifdef OPENGL
     glGetProgramInfoLog(programID, static_cast<GLsizei>(bufferSize), nullptr,
                         logBuffer);
 #elif defined(METAL)
     strncpy(logBuffer, "Metal program link status available via exceptions.",
-            bufferSize);
+            bufferSize - 1);
+    logBuffer[bufferSize - 1] = '\0';
 #elif defined(VULKAN)
     const auto &state = vulkan::programState(const_cast<ShaderProgram *>(this));
 

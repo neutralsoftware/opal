@@ -2227,6 +2227,8 @@ void CommandBuffer::waitForSubmittedWork() {
 }
 
 void CommandBuffer::bindPipeline(const std::shared_ptr<Pipeline> &pipeline) {
+    detail::require(pipeline != nullptr,
+                    "CommandBuffer::bindPipeline requires a pipeline");
 #ifdef METAL
     metal::pipelineState(pipeline.get()).suppressTextureReset = true;
 #endif

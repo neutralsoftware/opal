@@ -167,6 +167,10 @@ std::shared_ptr<Framebuffer> Framebuffer::create() {
 
 void Framebuffer::attachTexture(const std::shared_ptr<Texture> &texture,
                                 int attachmentIndex) {
+    detail::require(texture != nullptr,
+                    "Framebuffer::attachTexture requires a texture");
+    detail::require(attachmentIndex >= 0,
+                    "Framebuffer::attachTexture index must be nonnegative");
 #ifdef OPENGL
     glBindFramebuffer(GL_FRAMEBUFFER, framebufferID);
     GLenum attachmentType =
@@ -183,6 +187,8 @@ void Framebuffer::attachTexture(const std::shared_ptr<Texture> &texture,
 }
 
 void Framebuffer::addAttachment(const Attachment &attachment) {
+    detail::require(attachment.texture != nullptr,
+                    "Framebuffer::addAttachment requires a texture");
 #ifdef OPENGL
     glBindFramebuffer(GL_FRAMEBUFFER, framebufferID);
     GLenum attachmentType;
@@ -457,6 +463,9 @@ void Framebuffer::setDrawBuffers(int attachmentCount) {
 std::shared_ptr<ResolveAction>
 ResolveAction::create(std::shared_ptr<Framebuffer> source,
                       std::shared_ptr<Framebuffer> destination) {
+    detail::require(
+        source != nullptr && destination != nullptr,
+        "ResolveAction requires source and destination framebuffers");
     auto action = std::make_shared<ResolveAction>();
     action->source = std::move(source);
     action->destination = std::move(destination);
@@ -469,6 +478,9 @@ ResolveAction::create(std::shared_ptr<Framebuffer> source,
 std::shared_ptr<ResolveAction> ResolveAction::createForColorAttachment(
     std::shared_ptr<Framebuffer> source,
     std::shared_ptr<Framebuffer> destination, int colorAttachmentIndex) {
+    detail::require(
+        source != nullptr && destination != nullptr,
+        "ResolveAction requires source and destination framebuffers");
     auto action = std::make_shared<ResolveAction>();
     action->source = std::move(source);
     action->destination = std::move(destination);
@@ -481,6 +493,9 @@ std::shared_ptr<ResolveAction> ResolveAction::createForColorAttachment(
 std::shared_ptr<ResolveAction>
 ResolveAction::createForDepth(std::shared_ptr<Framebuffer> source,
                               std::shared_ptr<Framebuffer> destination) {
+    detail::require(
+        source != nullptr && destination != nullptr,
+        "ResolveAction requires source and destination framebuffers");
     auto action = std::make_shared<ResolveAction>();
     action->source = std::move(source);
     action->destination = std::move(destination);
@@ -492,6 +507,10 @@ ResolveAction::createForDepth(std::shared_ptr<Framebuffer> source,
 
 void CommandBuffer::performResolve(
     const std::shared_ptr<ResolveAction> &action) {
+    detail::require(action != nullptr && action->source != nullptr &&
+                        action->destination != nullptr,
+                    "CommandBuffer::performResolve requires an action with "
+                    "source and destination");
 #ifdef OPENGL
     glBindFramebuffer(GL_READ_FRAMEBUFFER, action->source->framebufferID);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, action->destination->framebufferID);

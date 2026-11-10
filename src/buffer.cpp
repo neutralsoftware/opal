@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstring>
 #include <glad/glad.h>
+#include <limits>
 #include <memory>
 #include <opal/opal.h>
 #include <stdexcept>
@@ -66,6 +67,9 @@ std::shared_ptr<Buffer> Buffer::create(BufferUsage usage, size_t size,
                                        const void *data,
                                        MemoryUsageType memoryUsage,
                                        int callerId) {
+    detail::require(
+        size <= static_cast<size_t>(std::numeric_limits<ptrdiff_t>::max()),
+        "Buffer::create size exceeds the supported address range");
     static uint32_t nextBufferId = 1;
     auto buffer = std::make_shared<Buffer>();
     buffer->usage = usage;
@@ -177,6 +181,16 @@ std::shared_ptr<Buffer> Buffer::create(BufferUsage usage, size_t size,
 }
 
 void Buffer::updateData(size_t offset, size_t size, const void *data) {
+    detail::require(size == 0 || data != nullptr,
+                    "Buffer::updateData requires data for a nonempty update");
+    const size_t limit =
+        static_cast<size_t>(std::numeric_limits<ptrdiff_t>::max());
+    detail::require(offset <= limit && size <= limit - offset,
+                    "Buffer::updateData offset plus size exceeds the supported "
+                    "address range");
+    if (size == 0) {
+        return;
+    }
 #ifdef OPENGL
     uint glTarget;
     switch (usage) {
