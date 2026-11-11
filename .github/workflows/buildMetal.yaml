@@ -23,10 +23,14 @@ jobs:
               run: |
                   cmake -S . -B build \
                   -G Ninja \
-                  -DBACKEND=AUTO \
-                  -DBEZEL_NATIVE=OFF \
+                  -DOPAL_BACKEND=METAL \
+                  -DOPAL_BUILD_C_ABI=ON \
+                  -DOPAL_BUILD_C_ABI_EXAMPLES=ON \
                   -DCMAKE_BUILD_TYPE=Release \
                   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+            - name: Check C ABI contract
+              run: python3 abi/check_contract.py
 
             - name: Build
               shell: bash

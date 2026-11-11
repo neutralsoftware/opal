@@ -1107,6 +1107,9 @@ std::shared_ptr<Texture> Texture::create(TextureType type, TextureFormat format,
                                          int width, int height,
                                          TextureDataFormat dataFormat,
                                          const void *data, uint mipLevels) {
+    detail::require(
+        width > 0 && height > 0 && mipLevels > 0,
+        "Texture::create requires positive dimensions and mip levels");
     const auto emitCreated = [&](const std::shared_ptr<Texture> &texture) {
         detail::emit(ResourceEvent{
             "-1", ResourceType::Texture, ResourceOperation::Created,
@@ -1151,8 +1154,17 @@ std::shared_ptr<Texture> Texture::create(TextureType type, TextureFormat format,
             format == TextureFormat::Red16F) {
             dataType = GL_FLOAT;
         }
-        glTexImage2D(textureType, 0, glFormat, width, height, 0, glDataFmt,
-                     dataType, data);
+        if (format == TextureFormat::Depth24Stencil8) {
+            glTexImage2D(textureType, 0, glFormat, width, height, 0,
+                         GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, data);
+        } else {
+            if (format == TextureFormat::Depth32F ||
+                format == TextureFormat::DepthComponent24) {
+                dataType = GL_FLOAT;
+            }
+            glTexImage2D(textureType, 0, glFormat, width, height, 0, glDataFmt,
+                         dataType, data);
+        }
         if (mipLevels > 1 && data != nullptr) {
             glGenerateMipmap(textureType);
         }
@@ -1299,6 +1311,10 @@ std::shared_ptr<Texture> Texture::create(TextureType type, TextureFormat format,
 
 void Texture::updateFace(int faceIndex, const void *data, int width, int height,
                          TextureDataFormat dataFormat) {
+    detail::require(faceIndex >= 0 && faceIndex < 6,
+                    "Texture::updateFace cubemap face must be in [0, 5]");
+    detail::require(width > 0 && height > 0,
+                    "Texture::updateFace requires positive dimensions");
 #ifdef OPENGL
     const GLenum glDataFmt = getGLDataFormat(dataFormat);
     glBindTexture(GL_TEXTURE_CUBE_MAP, textureID);
@@ -1476,6 +1492,8 @@ void Texture::changeFormat(TextureFormat newFormat) {
 }
 
 void Texture::readData(void *buffer, TextureDataFormat dataFormat) {
+    detail::require(buffer != nullptr,
+                    "Texture::readData requires an output buffer");
 #ifdef OPENGL
     glBindTexture(this->glType, textureID);
     GLenum glDataFormat;
@@ -1981,6 +1999,9 @@ void Pipeline::bindTextureCubemap(const std::string &name, uint textureId,
 std::shared_ptr<Texture> Texture::createMultisampled(TextureFormat format,
                                                      int width, int height,
                                                      int samples) {
+    detail::require(
+        width > 0 && height > 0 && samples > 0,
+        "Texture::createMultisampled requires positive dimensions and samples");
 #ifdef OPENGL
     auto texture = std::make_shared<Texture>();
     texture->type = TextureType::Texture2DMultisample;
@@ -2059,6 +2080,8 @@ std::shared_ptr<Texture> Texture::create3D(TextureFormat format, int width,
                                            int height, int depth,
                                            TextureDataFormat dataFormat,
                                            const void *data) {
+    detail::require(width > 0 && height > 0 && depth > 0,
+                    "Texture::create3D requires positive dimensions");
 #ifdef OPENGL
     auto texture = std::make_shared<Texture>();
     texture->type = TextureType::Texture3D;

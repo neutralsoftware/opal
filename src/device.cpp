@@ -184,8 +184,10 @@ void *Context::getMetalTargetView() const { return metalTargetView; }
 
 std::shared_ptr<Context> Context::create(ContextConfiguration config) {
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_JOYSTICK)) {
-        detail::log(LogLevel::Error, "Failed to initialize SDL");
-        throw std::runtime_error("Failed to initialize SDL");
+        detail::log(LogLevel::Error,
+                    std::string("Failed to initialize SDL: ") + SDL_GetError());
+        throw std::runtime_error(std::string("Failed to initialize SDL: ") +
+                                 SDL_GetError());
     }
 
     detail::log(LogLevel::Info, "Initializing graphics context");
@@ -320,12 +322,21 @@ void Context::setHidden(bool enabled) { hidden = enabled; }
 
 void Context::makeCurrent() {
     if (this->window != nullptr && this->glContext != nullptr) {
-        SDL_GL_MakeCurrent(this->window, this->glContext);
+        if (!SDL_GL_MakeCurrent(this->window, this->glContext)) {
+            const std::string message =
+                std::string("Failed to make OpenGL context current: ") +
+                SDL_GetError();
+            detail::log(LogLevel::Error, message);
+            throw std::runtime_error(message);
+        }
     }
 }
 
 SDL_Window *Context::makeWindow(int width, int height, const char *title,
                                 SDL_DisplayID displayID) {
+    detail::require(width > 0 && height > 0,
+                    "Context::makeWindow requires positive dimensions");
+    detail::require(title != nullptr, "Context::makeWindow requires a title");
     Uint64 windowFlags = 0;
 
     if (config.useOpenGL) {
@@ -528,6 +539,7 @@ MTL::Device *Device::getMetalDevice() const {
 
 std::shared_ptr<Device>
 Device::acquire([[maybe_unused]] const std::shared_ptr<Context> &context) {
+    detail::require(context != nullptr, "Device::acquire requires a context");
 #ifdef OPENGL
     if (!gladLoadGLLoader((GLADloadproc)SDL_GL_GetProcAddress)) {
         detail::log(LogLevel::Error, "Failed to initialize GLAD");

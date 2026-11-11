@@ -9,5 +9,6 @@ Start here:
 3. [API reference](api-reference.md): every public type, enum, method, and exposed data member.
 4. [Rendering recipes](recipes.md): textures, offscreen passes, multisampling, diagnostics, and ray tracing.
 5. [Backend notes](backends.md): shader languages, feature limits, and troubleshooting.
+6. [C ABI manual](c-abi.md): C integration, ownership, errors, examples, and the [C function reference](c-abi-reference.md).
 
 The [public header](../include/opal/opal.h) defines exact C++ signatures and default arguments. Internal headers under `src/` are implementation details. Bundled dependencies have their own APIs and documentation.

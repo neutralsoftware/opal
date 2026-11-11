@@ -264,8 +264,8 @@ For OpenGL, bind the pipeline before uniform/texture setters so `glUniform` affe
 | `DepthStencilBuffer` member | Behavior |
 | --- | --- |
 | `create(width, height, format = Depth24Stencil8)` | Creates a depth/stencil attachment wrapper. |
-| `texture` | Texture representation used by texture-based backends. |
-| `renderbufferID` | OpenGL renderbuffer identifier; not a portable handle. |
+| `texture` | Owned depth texture used on every backend. |
+| `renderbufferID` | Zero for this texture-backed wrapper; no separate renderbuffer is allocated. |
 
 | `Framebuffer` method | Behavior |
 | --- | --- |

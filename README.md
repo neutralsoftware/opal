@@ -6,6 +6,8 @@ Opal is a C++20 rendering abstraction library with Metal, Vulkan, and OpenGL bac
 
 Start with the [getting-started guide](docs/getting-started.md), browse the [complete API reference](docs/api-reference.md), or run the [examples](examples/README.md). The [documentation index](docs/README.md) also links rendering recipes and backend limitations.
 
+The [C ABI manual](docs/c-abi.md) covers the optional `Opal::C` shared library, its complete function reference, and a C99 example.
+
 ## Add Opal to a CMake project
 
 ### Git submodule

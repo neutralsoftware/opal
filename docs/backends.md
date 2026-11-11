@@ -15,7 +15,7 @@ Compile each shader, check its status, attach it to a program, link the program,
 - `Device::submitCommandBuffer()` is currently empty. `CommandBuffer::commit()` submits Metal/Vulkan work and presents the default render target when required. OpenGL needs an explicit `SDL_GL_SwapWindow()`.
 - OpenGL compute dispatch throws. `UniformBuffer` and `ShaderRead` buffer usages throw on OpenGL. `Pipeline::bindBuffer(name, Buffer)` throws there; the vector/raw-data overloads currently do nothing on OpenGL. Use scalar/vector/matrix uniform setters instead.
 - `Pipeline::bindTextureArray()` has Metal and Vulkan definitions, but no OpenGL definition. Metal uses a compute argument buffer; Vulkan uses an image descriptor array in descriptor set zero.
-- `ShaderProgram::use()` is declared in the public header but has no implementation. Bind a built pipeline through `CommandBuffer::bindPipeline()` instead.
+- `ShaderProgram::use()` binds a linked OpenGL program and throws on Metal/Vulkan. Bind a built pipeline through `CommandBuffer::bindPipeline()` on those backends.
 - Metal rejects fixed-function logic operations during pipeline build. Geometry and tessellation stage enum values do not imply a complete Metal stage implementation; the Metal linker handles vertex, fragment, and compute functions.
 - Ray acceleration structures are available only under `METAL` or `VULKAN`. Metal traces rays from compute kernels. `dispatchRays()` is implemented only for Vulkan ray-tracing programs and throws on other backends.
 - `performSpatialUpscale()` is an optional Metal/Apple path and returns false when unavailable. Provide a normal rendering or resolve fallback.
