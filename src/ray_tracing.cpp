@@ -594,9 +594,9 @@ opal::PrimitiveAccelerationStructure::create(
     accelerationInfo.size = sizes.accelerationStructureSize;
     accelerationInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
     VkAccelerationStructureKHR accelerationStructure = VK_NULL_HANDLE;
-    VULKAN_GUARD(device.createAccelerationStructure(
-                     device.device, &accelerationInfo, nullptr,
-                     &accelerationStructure),
+    VULKAN_GUARD(device.createAccelerationStructure(device.device,
+                                                    &accelerationInfo, nullptr,
+                                                    &accelerationStructure),
                  "Failed to create BLAS");
 
     VkBuffer scratchBuffer = VK_NULL_HANDLE;
@@ -783,9 +783,9 @@ opal::InstanceAccelerationStructure::create(
     accelerationInfo.size = sizes.accelerationStructureSize;
     accelerationInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
     VkAccelerationStructureKHR accelerationStructure = VK_NULL_HANDLE;
-    VULKAN_GUARD(device.createAccelerationStructure(
-                     device.device, &accelerationInfo, nullptr,
-                     &accelerationStructure),
+    VULKAN_GUARD(device.createAccelerationStructure(device.device,
+                                                    &accelerationInfo, nullptr,
+                                                    &accelerationStructure),
                  "Failed to create TLAS");
     VkBuffer scratchBuffer = VK_NULL_HANDLE;
     VkDeviceMemory scratchMemory = VK_NULL_HANDLE;
