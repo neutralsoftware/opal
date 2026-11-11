@@ -7,6 +7,7 @@
 // Copyright (c) 2025 maxvdec
 //
 
+#include "diagnostics.h"
 #include "opal/opal.h"
 #include <algorithm>
 #include <cstddef>
