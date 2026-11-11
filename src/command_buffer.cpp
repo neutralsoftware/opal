@@ -1365,15 +1365,7 @@ void CommandBuffer::beginPass(std::shared_ptr<RenderPass> newRenderPass) {
     }
 
     auto &state = metal::commandBufferState(this);
-    if (state.encoder != nullptr) {
-        state.encoder->endEncoding();
-        state.encoder = nullptr;
-        state.textureBindingsInitialized = false;
-    }
-    if (state.computeEncoder != nullptr) {
-        state.computeEncoder->endEncoding();
-        state.computeEncoder = nullptr;
-    }
+    endPass();
 
     if (state.commandBuffer == nullptr) {
         state.commandBuffer = deviceState.queue->commandBuffer();
@@ -1941,14 +1933,23 @@ void CommandBuffer::beginSampled(
 void CommandBuffer::endPass() {
 #if defined(METAL)
     auto &state = metal::commandBufferState(this);
+    if (state.computeEncoder != nullptr) {
+        state.computeEncoder->endEncoding();
+        state.computeEncoder = nullptr;
+    }
+    if (state.encoder == nullptr && state.commandBuffer != nullptr &&
+        state.passDescriptor != nullptr) {
+        state.encoder =
+            state.commandBuffer->renderCommandEncoder(state.passDescriptor);
+        if (state.encoder == nullptr) {
+            throw std::runtime_error(
+                "Failed to create Metal render command encoder");
+        }
+    }
     if (state.encoder != nullptr) {
         state.encoder->endEncoding();
         state.encoder = nullptr;
         state.textureBindingsInitialized = false;
-    }
-    if (state.computeEncoder != nullptr) {
-        state.computeEncoder->endEncoding();
-        state.computeEncoder = nullptr;
     }
     if (state.passDescriptor != nullptr) {
         state.passDescriptor->release();
@@ -2071,20 +2072,7 @@ void CommandBuffer::commit() {
         return;
     }
 
-    if (state.encoder != nullptr) {
-        state.encoder->endEncoding();
-        state.encoder = nullptr;
-        state.textureBindingsInitialized = false;
-    }
-    if (state.computeEncoder != nullptr) {
-        state.computeEncoder->endEncoding();
-        state.computeEncoder = nullptr;
-    }
-
-    if (state.passDescriptor != nullptr) {
-        state.passDescriptor->release();
-        state.passDescriptor = nullptr;
-    }
+    endPass();
 
     if (state.needsPresent && state.drawable != nullptr) {
         state.commandBuffer->presentDrawable(state.drawable);
