@@ -73,7 +73,7 @@ Internal C++ checks also report invalid inputs through the existing Opal log cal
 
 Register process-wide log/resource/draw callbacks with `opal_set_log_callback`, `opal_set_resource_callback`, and `opal_set_draw_callback`. Each accepts an independent `void *user_data`; a null callback unregisters it. Events and their strings are borrowed only for the duration of the callback. Copy them if needed. Callbacks must not throw, destroy active rendering objects, or re-enter rendering. A log callback receives native log messages; C-boundary validation errors are retrieved through `opal_get_last_error()`.
 
-Callback registration pairs are published atomically. A callback already executing may finish after it is unregistered: retain its user data until the rendering threads have stopped using it. Registration is shared with the C++ callback setters, so the most recent setter for each callback category wins. Unregister callbacks before unloading the shared library.
+Callback registration pairs are copied under a mutex; callbacks run after the mutex is released. A callback already executing may finish after it is unregistered: retain its user data until the rendering threads have stopped using it. Registration is shared with the C++ callback setters, so the most recent setter for each callback category wins. Unregister callbacks before unloading the shared library.
 
 ## Ownership and threading
 

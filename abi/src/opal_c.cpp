@@ -1,11 +1,11 @@
 #include "opal_c.h"
 #include <algorithm>
-#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <exception>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <opal/opal.h>
 #include <stdexcept>
@@ -2161,9 +2161,24 @@ struct DrawRegistration {
     OpalDrawCallback callback;
     void *user;
 };
-std::atomic<std::shared_ptr<LogRegistration>> log_registration;
-std::atomic<std::shared_ptr<ResourceRegistration>> resource_registration;
-std::atomic<std::shared_ptr<DrawRegistration>> draw_registration;
+template <class T> class CallbackRegistration {
+  public:
+    std::shared_ptr<T> load() {
+        std::lock_guard lock(mutex);
+        return value;
+    }
+    void store(std::shared_ptr<T> registration) {
+        std::lock_guard lock(mutex);
+        value = std::move(registration);
+    }
+
+  private:
+    std::mutex mutex;
+    std::shared_ptr<T> value;
+};
+CallbackRegistration<LogRegistration> log_registration;
+CallbackRegistration<ResourceRegistration> resource_registration;
+CallbackRegistration<DrawRegistration> draw_registration;
 void log_bridge(opal::LogLevel level, const char *message) {
     auto r = log_registration.load();
     if (r && r->callback)
