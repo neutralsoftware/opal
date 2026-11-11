@@ -1154,8 +1154,17 @@ std::shared_ptr<Texture> Texture::create(TextureType type, TextureFormat format,
             format == TextureFormat::Red16F) {
             dataType = GL_FLOAT;
         }
-        glTexImage2D(textureType, 0, glFormat, width, height, 0, glDataFmt,
-                     dataType, data);
+        if (format == TextureFormat::Depth24Stencil8) {
+            glTexImage2D(textureType, 0, glFormat, width, height, 0,
+                         GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, data);
+        } else {
+            if (format == TextureFormat::Depth32F ||
+                format == TextureFormat::DepthComponent24) {
+                dataType = GL_FLOAT;
+            }
+            glTexImage2D(textureType, 0, glFormat, width, height, 0, glDataFmt,
+                         dataType, data);
+        }
         if (mipLevels > 1 && data != nullptr) {
             glGenerateMipmap(textureType);
         }

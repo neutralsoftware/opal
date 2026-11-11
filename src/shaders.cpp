@@ -844,6 +844,17 @@ void ShaderProgram::link() {
 #endif
 }
 
+void ShaderProgram::use() {
+#ifdef OPENGL
+    detail::require(getProgramStatus(),
+                    "ShaderProgram::use requires a linked program");
+    glUseProgram(programID);
+#else
+    throw std::runtime_error(
+        "Standalone shader program binding requires OpenGL; bind a pipeline instead");
+#endif
+}
+
 bool ShaderProgram::getProgramStatus() const {
 #ifdef OPENGL
     GLint success;

@@ -130,6 +130,41 @@ std::shared_ptr<RenderPass> RenderPass::create() {
     return std::make_shared<RenderPass>();
 }
 
+std::shared_ptr<DepthStencilBuffer>
+DepthStencilBuffer::create(int width, int height, TextureFormat format) {
+    detail::require(width > 0 && height > 0,
+                    "DepthStencilBuffer::create requires positive dimensions");
+    detail::require(format == TextureFormat::Depth24Stencil8 ||
+                        format == TextureFormat::DepthComponent24 ||
+                        format == TextureFormat::Depth32F,
+                    "DepthStencilBuffer::create requires a depth format");
+    auto buffer = std::make_shared<DepthStencilBuffer>();
+    buffer->renderbufferID = 0;
+    buffer->texture = Texture::create(TextureType::Texture2D, format, width,
+                                      height, TextureDataFormat::DepthComponent);
+    return buffer;
+}
+
+void Framebuffer::attachDepthStencilBuffer(
+    std::shared_ptr<DepthStencilBuffer> buffer) {
+    detail::require(buffer != nullptr && buffer->texture != nullptr,
+                    "Framebuffer::attachDepthStencilBuffer requires a depth texture");
+    const auto &texture = buffer->texture;
+    detail::require(texture->format == TextureFormat::Depth24Stencil8 ||
+                        texture->format == TextureFormat::DepthComponent24 ||
+                        texture->format == TextureFormat::Depth32F,
+                    "Framebuffer::attachDepthStencilBuffer requires a depth format");
+    detail::require((width == 0 || width == texture->width) &&
+                        (height == 0 || height == texture->height),
+                    "Depth texture dimensions must match the framebuffer");
+    addAttachment({texture->format == TextureFormat::Depth24Stencil8
+                       ? Attachment::Type::DepthStencil
+                       : Attachment::Type::Depth,
+                   texture});
+    width = texture->width;
+    height = texture->height;
+}
+
 void RenderPass::setFramebuffer(std::shared_ptr<Framebuffer> framebuffer) {
     this->framebuffer = std::move(framebuffer);
 }

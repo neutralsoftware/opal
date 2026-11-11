@@ -899,7 +899,13 @@ OpalResult OPAL_C_CALL opal_shader_program_attach_shader(
 }
 
 OpalResult OPAL_C_CALL opal_shader_program_use(OpalShaderProgram *handle) {
-    return guard(__func__, [&] { object(handle)->use(); });
+    return guard(__func__, [&] {
+#if defined(OPENGL)
+        object(handle)->use();
+#else
+        throw Unsupported{};
+#endif
+    });
 }
 
 OpalResult OPAL_C_CALL opal_shader_program_is_compute_program(
