@@ -50,7 +50,8 @@ constexpr GLenum glInternalFormatTable[] = {GL_RGBA8,
                                             GL_DEPTH_COMPONENT24,
                                             GL_DEPTH_COMPONENT32F,
                                             GL_R8,
-                                            GL_R16F};
+                                            GL_R16F,
+                                            GL_RGBA32F};
 
 constexpr GLenum glDataFormatTable[] = {
     GL_RGBA, GL_RGB, GL_RED, GL_BGR, GL_BGRA, GL_DEPTH_COMPONENT,
@@ -98,6 +99,9 @@ inline float calculateTextureSizeMb(TextureFormat format, int width, int height,
         break;
     case TextureFormat::Rgb8:
         bytesPerPixel = 3;
+        break;
+    case TextureFormat::Rgba32F:
+        bytesPerPixel = 16;
         break;
     case TextureFormat::Rgba16F:
         bytesPerPixel = 8;
@@ -173,6 +177,8 @@ inline size_t metalSourceBytesPerChannel(TextureFormat textureFormat,
         return 4;
     }
     switch (textureFormat) {
+    case TextureFormat::Rgba32F:
+        return sizeof(float);
     case TextureFormat::Rgba16F:
     case TextureFormat::Rgb16F:
     case TextureFormat::Red16F:
@@ -184,6 +190,8 @@ inline size_t metalSourceBytesPerChannel(TextureFormat textureFormat,
 
 inline size_t metalDestinationBytesPerChannel(TextureFormat textureFormat) {
     switch (textureFormat) {
+    case TextureFormat::Rgba32F:
+        return sizeof(float);
     case TextureFormat::Rgba16F:
     case TextureFormat::Rgb16F:
     case TextureFormat::Red16F:
@@ -426,6 +434,7 @@ size_t textureFormatChannels(TextureFormat format) {
     case TextureFormat::Rgba8:
     case TextureFormat::sRgba8:
     case TextureFormat::Rgba16F:
+    case TextureFormat::Rgba32F:
         return 4;
     case TextureFormat::Rgb8:
     case TextureFormat::sRgb8:
@@ -448,7 +457,7 @@ bool isDepthTextureFormat(TextureFormat format) {
 }
 
 size_t sourceChannelSize(TextureFormat format, TextureDataFormat dataFormat) {
-    if (isHalfTextureFormat(format) ||
+    if (isHalfTextureFormat(format) || format == TextureFormat::Rgba32F ||
         dataFormat == TextureDataFormat::DepthComponent) {
         return sizeof(float);
     }
@@ -498,7 +507,9 @@ VulkanUploadData prepareVulkanUpload(const void *data, size_t texelCount,
         }
 
         uint8_t *destination = upload.bytes.data() + texel * destinationSize;
-        if (format == TextureFormat::Depth32F) {
+        if (format == TextureFormat::Rgba32F) {
+            std::memcpy(destination, channels, sizeof(channels));
+        } else if (format == TextureFormat::Depth32F) {
             std::memcpy(destination, channels, sizeof(float));
         } else if (format == TextureFormat::DepthComponent24 ||
                    format == TextureFormat::Depth24Stencil8) {
@@ -1019,7 +1030,9 @@ void readVulkanTexture(Texture *texture, void *output,
     for (size_t texel = 0; texel < texelCount; ++texel) {
         float channels[4] = {0.0f, 0.0f, 0.0f, 1.0f};
         const uint8_t *sourceTexel = source + texel * sourceTexelSize;
-        if (texture->format == TextureFormat::Depth32F) {
+        if (texture->format == TextureFormat::Rgba32F) {
+            std::memcpy(channels, sourceTexel, sizeof(channels));
+        } else if (texture->format == TextureFormat::Depth32F) {
             std::memcpy(channels, sourceTexel, sizeof(float));
         } else if (texture->format == TextureFormat::DepthComponent24 ||
                    texture->format == TextureFormat::Depth24Stencil8) {
@@ -1149,7 +1162,8 @@ std::shared_ptr<Texture> Texture::create(TextureType type, TextureFormat format,
 
     if (textureType == GL_TEXTURE_2D && width > 0 && height > 0) {
         GLenum dataType = GL_UNSIGNED_BYTE;
-        if (format == TextureFormat::Rgba16F ||
+        if (format == TextureFormat::Rgba32F ||
+            format == TextureFormat::Rgba16F ||
             format == TextureFormat::Rgb16F ||
             format == TextureFormat::Red16F) {
             dataType = GL_FLOAT;
@@ -1422,7 +1436,9 @@ void Texture::updateData(const void *data, int width, int height,
 #ifdef OPENGL
     const GLenum glDataFmt = getGLDataFormat(dataFormat);
     GLenum dataType = GL_UNSIGNED_BYTE;
-    if (format == TextureFormat::Rgba16F || format == TextureFormat::Rgb16F ||
+    if (format == TextureFormat::Rgba32F ||
+        format == TextureFormat::Rgba16F ||
+        format == TextureFormat::Rgb16F ||
         format == TextureFormat::Red16F) {
         dataType = GL_FLOAT;
     }
@@ -1516,6 +1532,9 @@ void Texture::readData(void *buffer, TextureDataFormat dataFormat) {
         glDataFormat = GL_RGBA;
         break;
     }
+    if (format == TextureFormat::Rgba32F) {
+        glDataType = GL_FLOAT;
+    }
     glGetTexImage(this->glType, 0, glDataFormat, glDataType, buffer);
 #elif defined(METAL)
     auto &state = metal::textureState(this);
@@ -1536,6 +1555,9 @@ void Texture::readData(void *buffer, TextureDataFormat dataFormat) {
     MTL::Region region =
         MTL::Region::Make2D(0, 0, static_cast<NS::UInteger>(width),
                             static_cast<NS::UInteger>(height));
+    if (format == TextureFormat::Rgba32F) {
+        bytesPerPixel = 4 * sizeof(float);
+    }
     size_t rowBytes = static_cast<size_t>(width) * bytesPerPixel;
     NS::UInteger bytesPerRow = static_cast<NS::UInteger>(rowBytes);
     state.texture->getBytes(buffer, bytesPerRow, region, 0);
@@ -2096,7 +2118,9 @@ std::shared_ptr<Texture> Texture::create3D(TextureFormat format, int width,
 
     // Determine data type based on format
     GLenum dataType = GL_UNSIGNED_BYTE;
-    if (format == TextureFormat::Rgba16F || format == TextureFormat::Rgb16F ||
+    if (format == TextureFormat::Rgba32F ||
+        format == TextureFormat::Rgba16F ||
+        format == TextureFormat::Rgb16F ||
         format == TextureFormat::Red16F) {
         dataType = GL_FLOAT;
     }

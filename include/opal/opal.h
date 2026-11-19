@@ -230,7 +230,8 @@ enum class TextureFormat {
     DepthComponent24,
     Depth32F,
     Red8,
-    Red16F
+    Red16F,
+    Rgba32F
 };
 
 enum class TextureWrapMode {

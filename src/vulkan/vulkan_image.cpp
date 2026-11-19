@@ -256,6 +256,8 @@ VkFormat textureFormatToVkFormat(TextureFormat format) {
         return VK_FORMAT_R8G8B8A8_UNORM;
     case opal::TextureFormat::Rgba16F:
         return VK_FORMAT_R16G16B16A16_SFLOAT;
+    case opal::TextureFormat::Rgba32F:
+        return VK_FORMAT_R32G32B32A32_SFLOAT;
     case opal::TextureFormat::Rgb8:
         return VK_FORMAT_R8G8B8A8_UNORM;
     case opal::TextureFormat::Rgb16F:

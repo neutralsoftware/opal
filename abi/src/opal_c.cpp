@@ -583,7 +583,7 @@ OpalResult OPAL_C_CALL opal_texture_create(
         output(out,
                opal::Texture::create(
                    checked_enum<opal::TextureType>(type, 5),
-                   checked_enum<opal::TextureFormat>(format, 11), width, height,
+                   checked_enum<opal::TextureFormat>(format, 12), width, height,
                    checked_enum<opal::TextureDataFormat>(data_format, 6), data,
                    mip_levels),
                std::move(owner));
@@ -600,7 +600,7 @@ OpalResult OPAL_C_CALL opal_texture_create_multisampled(
         auto owner = current_device();
         output(out,
                opal::Texture::createMultisampled(
-                   checked_enum<opal::TextureFormat>(format, 11), width, height,
+                   checked_enum<opal::TextureFormat>(format, 12), width, height,
                    samples),
                std::move(owner));
     });
@@ -615,7 +615,7 @@ OpalResult OPAL_C_CALL opal_texture_create_depth_cubemap(
         auto owner = current_device();
         output(out,
                opal::Texture::createDepthCubemap(
-                   checked_enum<opal::TextureFormat>(format, 11), resolution),
+                   checked_enum<opal::TextureFormat>(format, 12), resolution),
                std::move(owner));
     });
 }
@@ -630,7 +630,7 @@ OpalResult OPAL_C_CALL opal_texture_create_3d(
         auto owner = current_device();
         output(out,
                opal::Texture::create3D(
-                   checked_enum<opal::TextureFormat>(format, 11), width, height,
+                   checked_enum<opal::TextureFormat>(format, 12), width, height,
                    depth, checked_enum<opal::TextureDataFormat>(data_format, 6),
                    data),
                std::move(owner));
@@ -645,7 +645,7 @@ OpalResult OPAL_C_CALL opal_texture_get_supported_sample_count(
         require(out && requested > 0 && count > 0 && formats);
         std::vector<opal::TextureFormat> values;
         for (size_t i = 0; i < count; ++i)
-            values.push_back(checked_enum<opal::TextureFormat>(formats[i], 11));
+            values.push_back(checked_enum<opal::TextureFormat>(formats[i], 12));
         *out = opal::Texture::getSupportedSampleCount(values, requested);
 #else
         throw Unsupported{};
@@ -694,7 +694,7 @@ OpalResult OPAL_C_CALL opal_texture_change_format(OpalTexture *handle,
                                                   OpalTextureFormat format) {
     return guard(__func__, [&] {
         object(handle)->changeFormat(
-            checked_enum<opal::TextureFormat>(format, 11));
+            checked_enum<opal::TextureFormat>(format, 12));
     });
 }
 
@@ -1404,7 +1404,7 @@ OpalResult OPAL_C_CALL opal_depth_stencil_buffer_create(
         output(
             out,
             opal::DepthStencilBuffer::create(
-                width, height, checked_enum<opal::TextureFormat>(format, 11)),
+                width, height, checked_enum<opal::TextureFormat>(format, 12)),
             std::move(owner));
     });
 }
@@ -2340,6 +2340,9 @@ static_assert(static_cast<int32_t>(opal::TextureFormat::Red8) ==
 
 static_assert(static_cast<int32_t>(opal::TextureFormat::Red16F) ==
               OPAL_TEXTURE_FORMAT_RED16F);
+
+static_assert(static_cast<int32_t>(opal::TextureFormat::Rgba32F) ==
+              OPAL_TEXTURE_FORMAT_RGBA32F);
 
 static_assert(static_cast<int32_t>(opal::TextureWrapMode::Repeat) ==
               OPAL_TEXTURE_WRAP_MODE_REPEAT);
