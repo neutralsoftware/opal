@@ -763,6 +763,8 @@ size_t bytesPerPixel(TextureFormat format) {
 
     case TextureFormat::Rgba16F:
         return 8;
+    case TextureFormat::Rgba32F:
+        return 16;
 
     case TextureFormat::Rgb16F:
         return 8;

@@ -878,6 +878,8 @@ MTL::PixelFormat textureFormatToPixelFormat(TextureFormat format) {
         return MTL::PixelFormatRGBA8Unorm_sRGB;
     case TextureFormat::Rgba16F:
         return MTL::PixelFormatRGBA16Float;
+    case TextureFormat::Rgba32F:
+        return MTL::PixelFormatRGBA32Float;
     case TextureFormat::Rgb16F:
         return MTL::PixelFormatRGBA16Float;
     case TextureFormat::Depth24Stencil8:
