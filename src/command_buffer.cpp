@@ -1987,9 +1987,13 @@ void CommandBuffer::endPass() {
                     VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL ||
                 textureState.layout ==
                     VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
-                vulkan::transitionTexture(
-                    state.commandBuffer, textureState,
-                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                const VkImageLayout sampledLayout =
+                    (textureState.aspectMask &
+                     (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) != 0
+                        ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                        : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                vulkan::transitionTexture(state.commandBuffer, textureState,
+                                          sampledLayout);
             }
         }
     }
