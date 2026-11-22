@@ -262,6 +262,16 @@ class Texture {
     create(TextureType type, TextureFormat format, int width, int height,
            TextureDataFormat dataFormat = TextureDataFormat::Rgba,
            const void *data = nullptr, uint mipLevels = 1);
+    struct Upload2D {
+        TextureFormat format;
+        int width;
+        int height;
+        TextureDataFormat dataFormat;
+        const void *data;
+        uint mipLevels;
+    };
+    static std::vector<std::shared_ptr<Texture>>
+    create2DBatch(const std::vector<Upload2D> &uploads);
     ~Texture();
 
     /**
