@@ -17,6 +17,7 @@
 #include <glm/glm.hpp>
 #include <memory>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 #ifdef METAL
 #include "metal_state.h"
@@ -580,6 +581,35 @@ void destroyTransferBuffer(vulkan::DeviceState &deviceState,
     buffer = {};
 }
 
+struct VulkanTextureBatch {
+    vulkan::DeviceState &device;
+    VkCommandBuffer command = VK_NULL_HANDLE;
+    std::vector<VulkanTransferBuffer> staging;
+    std::vector<std::shared_ptr<Texture>> textures;
+
+    ~VulkanTextureBatch() {
+        if (command != VK_NULL_HANDLE)
+            vkFreeCommandBuffers(device.device, device.graphicsPool, 1, &command);
+        for (auto &buffer : staging)
+            destroyTransferBuffer(device, buffer);
+    }
+};
+
+thread_local VulkanTextureBatch *activeTextureBatch = nullptr;
+
+VkCommandBuffer beginTextureCommands(vulkan::DeviceState &device) {
+    if (activeTextureBatch == nullptr)
+        return vulkan::beginSingleTimeCommands(device);
+    if (activeTextureBatch->command == VK_NULL_HANDLE)
+        activeTextureBatch->command = vulkan::beginSingleTimeCommands(device);
+    return activeTextureBatch->command;
+}
+
+void endTextureCommands(vulkan::DeviceState &device, VkCommandBuffer command) {
+    if (activeTextureBatch == nullptr)
+        vulkan::endSingleTimeCommands(device, command);
+}
+
 VkImageLayout defaultVulkanTextureLayout(const vulkan::TextureState &state) {
     return isDepthTextureFormat(state.opalFormat)
                ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
@@ -919,12 +949,12 @@ void createVulkanImage(Texture *texture, int depth) {
 
     rebuildVulkanSampler(texture);
     VkCommandBuffer commandBuffer =
-        vulkan::beginSingleTimeCommands(deviceState);
+        beginTextureCommands(deviceState);
     VkImageLayout finalLayout = defaultVulkanTextureLayout(state);
     transitionVulkanImage(commandBuffer, state, VK_IMAGE_LAYOUT_UNDEFINED,
                           finalLayout, 0, state.mipLevels, 0,
                           state.arrayLayers);
-    vulkan::endSingleTimeCommands(deviceState, commandBuffer);
+    endTextureCommands(deviceState, commandBuffer);
     state.layout = finalLayout;
     if (state.type == TextureType::Texture2DMultisample) {
         state.generation++;
@@ -942,24 +972,38 @@ void uploadVulkanTexture(Texture *texture, const void *data, int width,
     size_t texelCount = static_cast<size_t>(width) *
                         static_cast<size_t>(height) *
                         static_cast<size_t>(depth);
-    VulkanUploadData upload =
-        prepareVulkanUpload(data, texelCount, texture->format, dataFormat);
-    VulkanTransferBuffer staging{};
-    createTransferBuffer(deviceState, upload.bytes.size(),
-                         VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                         staging);
+    const bool nativeRgba =
+        dataFormat == TextureDataFormat::Rgba &&
+        (texture->format == TextureFormat::Rgba8 ||
+         texture->format == TextureFormat::sRgba8);
+    VulkanUploadData converted;
+    if (!nativeRgba)
+        converted = prepareVulkanUpload(data, texelCount, texture->format, dataFormat);
+    const void *pixels = nativeRgba ? data : converted.bytes.data();
+    const size_t size = nativeRgba ? texelCount * 4 : converted.bytes.size();
 
-    void *mapped = nullptr;
-    VULKAN_GUARD(vkMapMemory(deviceState.device, staging.memory, 0,
-                             upload.bytes.size(), 0, &mapped),
-                 "Failed to map Vulkan texture upload memory");
-    std::memcpy(mapped, upload.bytes.data(), upload.bytes.size());
-    vkUnmapMemory(deviceState.device, staging.memory);
+    VulkanTransferBuffer temporary{};
+    auto &staging = activeTextureBatch != nullptr
+                        ? activeTextureBatch->staging.emplace_back()
+                        : temporary;
+    try {
+        createTransferBuffer(deviceState, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                 VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                             staging);
+        void *mapped = nullptr;
+        VULKAN_GUARD(vkMapMemory(deviceState.device, staging.memory, 0, size, 0,
+                                 &mapped),
+                     "Failed to map Vulkan texture upload memory");
+        std::memcpy(mapped, pixels, size);
+        vkUnmapMemory(deviceState.device, staging.memory);
+    } catch (...) {
+        destroyTransferBuffer(deviceState, temporary);
+        throw;
+    }
 
     VkCommandBuffer commandBuffer =
-        vulkan::beginSingleTimeCommands(deviceState);
+        beginTextureCommands(deviceState);
     transitionVulkanImage(commandBuffer, state, state.layout,
                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, 1,
                           arrayLayer, 1);
@@ -977,8 +1021,8 @@ void uploadVulkanTexture(Texture *texture, const void *data, int width,
     transitionVulkanImage(commandBuffer, state,
                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, state.layout, 0,
                           1, arrayLayer, 1);
-    vulkan::endSingleTimeCommands(deviceState, commandBuffer);
-    destroyTransferBuffer(deviceState, staging);
+    endTextureCommands(deviceState, commandBuffer);
+    destroyTransferBuffer(deviceState, temporary);
 }
 
 void readVulkanTexture(Texture *texture, void *output,
@@ -1305,6 +1349,8 @@ std::shared_ptr<Texture> Texture::create(TextureType type, TextureFormat format,
     state.type = type;
     state.dataFormat = dataFormat;
     state.opalFormat = format;
+    if (activeTextureBatch != nullptr)
+        activeTextureBatch->textures.push_back(texture);
     createVulkanImage(texture.get(), 1);
     texture->textureID = vulkan::registerTextureHandle(texture);
 
@@ -1321,6 +1367,56 @@ std::shared_ptr<Texture> Texture::create(TextureType type, TextureFormat format,
 #else
     return nullptr;
 #endif
+}
+
+std::vector<std::shared_ptr<Texture>>
+Texture::create2DBatch(const std::vector<Upload2D> &uploads) {
+    std::vector<std::shared_ptr<Texture>> textures;
+    textures.reserve(uploads.size());
+    if (uploads.empty())
+        return textures;
+
+    const auto createTextures = [&] {
+        for (const auto &upload : uploads) {
+            textures.push_back(create(TextureType::Texture2D, upload.format,
+                                      upload.width, upload.height,
+                                      upload.dataFormat, upload.data,
+                                      upload.mipLevels));
+        }
+    };
+#ifdef VULKAN
+    if (Device::globalInstance == nullptr)
+        throw std::runtime_error("Cannot create Vulkan textures without device");
+    if (activeTextureBatch != nullptr)
+        throw std::logic_error("Cannot nest Vulkan texture batches");
+    VulkanTextureBatch batch{vulkan::deviceState(Device::globalInstance)};
+    batch.staging.reserve(uploads.size());
+    batch.textures.reserve(uploads.size());
+    activeTextureBatch = &batch;
+    try {
+        createTextures();
+    } catch (...) {
+        activeTextureBatch = nullptr;
+        throw;
+    }
+    activeTextureBatch = nullptr;
+    vulkan::endSingleTimeCommands(batch.device,
+                                 std::exchange(batch.command, VK_NULL_HANDLE));
+#else
+    createTextures();
+#ifdef METAL
+    auto &device = metal::deviceState(Device::globalInstance);
+    auto *command = device.queue->commandBuffer();
+    auto *blit = command->blitCommandEncoder();
+    for (size_t i = 0; i < uploads.size(); ++i) {
+        if (uploads[i].data != nullptr && uploads[i].mipLevels > 1)
+            blit->generateMipmaps(metal::textureState(textures[i].get()).texture);
+    }
+    blit->endEncoding();
+    command->commit();
+#endif
+#endif
+    return textures;
 }
 
 void Texture::updateFace(int faceIndex, const void *data, int width, int height,
@@ -1611,7 +1707,7 @@ void Texture::generateMipmaps([[maybe_unused]] uint levels) {
     }
 
     VkCommandBuffer commandBuffer =
-        vulkan::beginSingleTimeCommands(deviceState);
+        beginTextureCommands(deviceState);
     int32_t mipWidth = static_cast<int32_t>(state.width);
     int32_t mipHeight = static_cast<int32_t>(state.height);
     int32_t mipDepth = static_cast<int32_t>(state.depth);
@@ -1649,7 +1745,7 @@ void Texture::generateMipmaps([[maybe_unused]] uint levels) {
         mipHeight = std::max(mipHeight / 2, 1);
         mipDepth = std::max(mipDepth / 2, 1);
     }
-    vulkan::endSingleTimeCommands(deviceState, commandBuffer);
+    endTextureCommands(deviceState, commandBuffer);
 #endif
 }
 
