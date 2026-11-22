@@ -590,6 +590,43 @@ OpalResult OPAL_C_CALL opal_texture_create(
     });
 }
 
+OpalResult OPAL_C_CALL opal_texture_create_2d_batch(
+    const OpalTextureUpload2D *uploads, size_t count, OpalTexture **out) {
+    return guard(__func__, [&] {
+        if (count == 0)
+            return;
+        require(out);
+        std::fill_n(out, count, nullptr);
+        require(uploads);
+
+        auto owner = current_device();
+        std::vector<opal::Texture::Upload2D> native;
+        native.reserve(count);
+        for (size_t i = 0; i < count; ++i) {
+            const auto &upload = uploads[i];
+            require(upload.width > 0 && upload.height > 0 && upload.mip_levels > 0);
+            native.push_back({
+                checked_enum<opal::TextureFormat>(upload.format, 12),
+                upload.width, upload.height,
+                checked_enum<opal::TextureDataFormat>(upload.data_format, 6),
+                upload.data, upload.mip_levels});
+        }
+
+        auto textures = opal::Texture::create2DBatch(native);
+        if (textures.size() != count)
+            throw std::runtime_error("Backend returned an incomplete texture batch");
+        size_t published = 0;
+        try {
+            for (; published < count; ++published)
+                output(&out[published], std::move(textures[published]), owner);
+        } catch (...) {
+            for (size_t i = 0; i < published; ++i)
+                release(std::exchange(out[i], nullptr));
+            throw;
+        }
+    });
+}
+
 OpalResult OPAL_C_CALL opal_texture_create_multisampled(
     OpalTextureFormat format, int32_t width, int32_t height, int32_t samples,
     OpalTexture **out) {
@@ -1656,6 +1693,14 @@ opal_command_buffer_wait_for_submitted_work(OpalCommandBuffer *handle) {
     return guard(__func__, [&] { object(handle)->waitForSubmittedWork(); });
 }
 
+OpalResult OPAL_C_CALL opal_command_buffer_get_swapchain_acquire_ms(
+    OpalCommandBuffer *handle, double *out) {
+    return guard(__func__, [&] {
+        require(out);
+        *out = object(handle)->getSwapchainAcquireMs();
+    });
+}
+
 OpalResult OPAL_C_CALL
 opal_command_buffer_unbind_pipeline(OpalCommandBuffer *handle) {
     return guard(__func__, [&] {
@@ -1767,6 +1812,25 @@ OpalResult OPAL_C_CALL opal_command_buffer_draw_indexed(
                 "bound pipeline");
         object(handle)->drawIndexed(index_count, instance_count, first_index,
                                     vertex_offset, first_instance, object_id);
+    });
+}
+
+OpalResult OPAL_C_CALL opal_command_buffer_draw_indexed_ranges(
+    OpalCommandBuffer *handle, const OpalIndexedDrawRange *ranges, size_t count,
+    int32_t object_id) {
+    return guard(__func__, [&] {
+        auto buffer = object(handle);
+        if (count == 0)
+            return;
+        require(ranges);
+        require(handle->recording && handle->pass_active && handle->pipeline_bound,
+                "Drawing requires recording, an active render pass, and a bound pipeline");
+
+        std::vector<opal::IndexedDrawRange> native;
+        native.reserve(count);
+        for (size_t i = 0; i < count; ++i)
+            native.push_back({ranges[i].first_index, ranges[i].index_count});
+        buffer->drawIndexedRanges(native, object_id);
     });
 }
 

@@ -540,6 +540,18 @@ OPAL_C_API OpalResult OPAL_C_CALL opal_texture_create(
     int32_t height, OpalTextureDataFormat data_format, const void *data,
     uint32_t mip_levels, OpalTexture **out);
 
+typedef struct OpalTextureUpload2D {
+    OpalTextureFormat format;
+    int32_t width;
+    int32_t height;
+    OpalTextureDataFormat data_format;
+    const void *data;
+    uint32_t mip_levels;
+} OpalTextureUpload2D;
+
+OPAL_C_API OpalResult OPAL_C_CALL opal_texture_create_2d_batch(
+    const OpalTextureUpload2D *uploads, size_t count, OpalTexture **out);
+
 OPAL_C_API OpalResult OPAL_C_CALL opal_texture_create_multisampled(
     OpalTextureFormat format, int32_t width, int32_t height, int32_t samples,
     OpalTexture **out);
@@ -922,6 +934,9 @@ opal_command_buffer_commit(OpalCommandBuffer *handle);
 OPAL_C_API OpalResult OPAL_C_CALL
 opal_command_buffer_wait_for_submitted_work(OpalCommandBuffer *handle);
 
+OPAL_C_API OpalResult OPAL_C_CALL opal_command_buffer_get_swapchain_acquire_ms(
+    OpalCommandBuffer *handle, double *out);
+
 OPAL_C_API OpalResult OPAL_C_CALL
 opal_command_buffer_unbind_pipeline(OpalCommandBuffer *handle);
 
@@ -964,6 +979,15 @@ OPAL_C_API OpalResult OPAL_C_CALL opal_command_buffer_draw(
 OPAL_C_API OpalResult OPAL_C_CALL opal_command_buffer_draw_indexed(
     OpalCommandBuffer *handle, uint32_t index_count, uint32_t instance_count,
     uint32_t first_index, int32_t vertex_offset, uint32_t first_instance,
+    int32_t object_id);
+
+typedef struct OpalIndexedDrawRange {
+    uint32_t first_index;
+    uint32_t index_count;
+} OpalIndexedDrawRange;
+
+OPAL_C_API OpalResult OPAL_C_CALL opal_command_buffer_draw_indexed_ranges(
+    OpalCommandBuffer *handle, const OpalIndexedDrawRange *ranges, size_t count,
     int32_t object_id);
 
 OPAL_C_API OpalResult OPAL_C_CALL opal_command_buffer_draw_patches(
