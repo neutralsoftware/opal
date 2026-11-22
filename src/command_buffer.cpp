@@ -9,6 +9,7 @@
 
 #include "diagnostics.h"
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <glad/glad.h>
@@ -1186,6 +1187,7 @@ std::shared_ptr<CommandBuffer> Device::acquireCommandBuffer() {
 }
 
 void CommandBuffer::start() {
+    swapchainAcquireMs = 0.0;
     boundPipeline = nullptr;
     boundDrawingState = nullptr;
     renderPass = nullptr;
@@ -1557,19 +1559,24 @@ void CommandBuffer::beginPass(std::shared_ptr<RenderPass> newRenderPass) {
                                              deviceState);
                 }
             }
-            VkResult result = vkAcquireNextImageKHR(
-                deviceState.device, contextState.swapchain, UINT64_MAX,
-                state.imageAvailableSemaphore, VK_NULL_HANDLE,
-                &state.imageIndex);
+            const auto acquireImage = [&] {
+                const auto started = std::chrono::steady_clock::now();
+                const VkResult result = vkAcquireNextImageKHR(
+                    deviceState.device, contextState.swapchain, UINT64_MAX,
+                    state.imageAvailableSemaphore, VK_NULL_HANDLE,
+                    &state.imageIndex);
+                swapchainAcquireMs += std::chrono::duration<double, std::milli>(
+                                          std::chrono::steady_clock::now() - started)
+                                          .count();
+                return result;
+            };
+            VkResult result = acquireImage();
             if (result == VK_ERROR_OUT_OF_DATE_KHR) {
                 if (!vulkan::recreateSwapchain(device->context.get(),
                                                deviceState)) {
                     throw std::runtime_error("Vulkan swapchain is unavailable");
                 }
-                result = vkAcquireNextImageKHR(
-                    deviceState.device, contextState.swapchain, UINT64_MAX,
-                    state.imageAvailableSemaphore, VK_NULL_HANDLE,
-                    &state.imageIndex);
+                result = acquireImage();
             }
             if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
                 throw std::runtime_error("Failed to acquire next Vulkan image");
@@ -2482,6 +2489,35 @@ void CommandBuffer::drawIndexed(uint indexCount, uint instanceCount,
         static_cast<NS::UInteger>(firstInstance));
     state.hasDraw = true;
 #elif defined(VULKAN)
+    const IndexedDrawRange range{firstIndex, indexCount};
+    drawVulkanIndexedRanges({&range, 1}, instanceCount, vertexOffset,
+                            firstInstance, objectId);
+#endif
+
+#ifndef VULKAN
+    detail::emit(DrawEvent{std::to_string(objectId), DrawType::Indexed,
+                           static_cast<unsigned int>(device->frameCount)});
+    drawCallCount++;
+#endif
+}
+
+void CommandBuffer::drawIndexedRanges(std::span<const IndexedDrawRange> ranges,
+                                      int objectId) {
+#ifdef VULKAN
+    if (!ranges.empty()) {
+        drawVulkanIndexedRanges(ranges, 1, 0, 0, objectId);
+    }
+#else
+    for (const auto &range : ranges) {
+        drawIndexed(range.indexCount, 1, range.firstIndex, 0, 0, objectId);
+    }
+#endif
+}
+
+#ifdef VULKAN
+void CommandBuffer::drawVulkanIndexedRanges(
+    std::span<const IndexedDrawRange> ranges, uint instanceCount,
+    int vertexOffset, uint firstInstance, int objectId) {
     if (boundPipeline == nullptr) {
         throw std::runtime_error("Vulkan indexed draw requires a pipeline");
     }
@@ -2520,14 +2556,15 @@ void CommandBuffer::drawIndexed(uint indexCount, uint instanceCount,
     vkCmdBindIndexBuffer(state.commandBuffer, index.buffer, 0,
                          VK_INDEX_TYPE_UINT32);
 
-    vkCmdDrawIndexed(state.commandBuffer, indexCount, instanceCount, firstIndex,
-                     vertexOffset, firstInstance);
-#endif
-
-    detail::emit(DrawEvent{std::to_string(objectId), DrawType::Indexed,
-                           static_cast<unsigned int>(device->frameCount)});
-    drawCallCount++;
+    for (const auto &range : ranges) {
+        vkCmdDrawIndexed(state.commandBuffer, range.indexCount, instanceCount,
+                         range.firstIndex, vertexOffset, firstInstance);
+        detail::emit(DrawEvent{std::to_string(objectId), DrawType::Indexed,
+                               static_cast<unsigned int>(device->frameCount)});
+    }
+    drawCallCount += static_cast<int>(ranges.size());
 }
+#endif
 
 void CommandBuffer::drawPatches(uint vertexCount, uint firstVertex,
                                 int objectId) {

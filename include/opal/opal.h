@@ -17,6 +17,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -1051,6 +1052,11 @@ class InstanceAccelerationStructure {
 
 #endif
 
+struct IndexedDrawRange {
+    uint firstIndex;
+    uint indexCount;
+};
+
 class CommandBuffer {
   public:
     ~CommandBuffer();
@@ -1061,6 +1067,7 @@ class CommandBuffer {
     void endPass();
     void commit();
     void waitForSubmittedWork();
+    double getSwapchainAcquireMs() const { return swapchainAcquireMs; }
 
     // The different commands
     void bindPipeline(const std::shared_ptr<Pipeline> &pipeline);
@@ -1074,6 +1081,8 @@ class CommandBuffer {
     void drawIndexed(uint indexCount, uint instanceCount = 1,
                      uint firstIndex = 0, int vertexOffset = 0,
                      uint firstInstance = 0, int objectId = -1);
+    void drawIndexedRanges(std::span<const IndexedDrawRange> ranges,
+                           int objectId = -1);
     /**
      * @brief Draws using tessellation patches.
      * @param vertexCount Number of vertices to draw.
@@ -1137,6 +1146,13 @@ class CommandBuffer {
     float clearColorValue[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     float clearDepthValue = 1.0f;
 
+#ifdef VULKAN
+    void drawVulkanIndexedRanges(std::span<const IndexedDrawRange> ranges,
+                                 uint instanceCount, int vertexOffset,
+                                 uint firstInstance, int objectId);
+#endif
+
+    double swapchainAcquireMs = 0.0;
     int drawCallCount = 0;
 
     bool hasStarted = false;
