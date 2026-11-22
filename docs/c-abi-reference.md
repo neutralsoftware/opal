@@ -68,6 +68,7 @@ OpalResult OPAL_C_CALL opal_command_buffer_start(OpalCommandBuffer *handle);
 OpalResult OPAL_C_CALL opal_command_buffer_end_pass(OpalCommandBuffer *handle);
 OpalResult OPAL_C_CALL opal_command_buffer_commit(OpalCommandBuffer *handle);
 OpalResult OPAL_C_CALL opal_command_buffer_wait_for_submitted_work(OpalCommandBuffer *handle);
+OpalResult OPAL_C_CALL opal_command_buffer_get_swapchain_acquire_ms(OpalCommandBuffer *handle, double *out);
 OpalResult OPAL_C_CALL opal_command_buffer_unbind_pipeline(OpalCommandBuffer *handle);
 OpalResult OPAL_C_CALL opal_command_buffer_reset_scissor(OpalCommandBuffer *handle);
 OpalResult OPAL_C_CALL opal_command_buffer_unbind_drawing_state(OpalCommandBuffer *handle);
@@ -81,6 +82,7 @@ OpalResult OPAL_C_CALL opal_command_buffer_begin_sampled( OpalCommandBuffer *han
 OpalResult OPAL_C_CALL opal_command_buffer_set_scissor(OpalCommandBuffer *handle, int32_t x, int32_t y, int32_t width, int32_t height);
 OpalResult OPAL_C_CALL opal_command_buffer_draw( OpalCommandBuffer *handle, uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex, uint32_t first_instance, int32_t object_id);
 OpalResult OPAL_C_CALL opal_command_buffer_draw_indexed( OpalCommandBuffer *handle, uint32_t index_count, uint32_t instance_count, uint32_t first_index, int32_t vertex_offset, uint32_t first_instance, int32_t object_id);
+OpalResult OPAL_C_CALL opal_command_buffer_draw_indexed_ranges(OpalCommandBuffer *handle, const OpalIndexedDrawRange *ranges, size_t count, int32_t object_id);
 OpalResult OPAL_C_CALL opal_command_buffer_draw_patches( OpalCommandBuffer *handle, uint32_t vertex_count, uint32_t first_vertex, int32_t object_id);
 OpalResult OPAL_C_CALL opal_command_buffer_dispatch( OpalCommandBuffer *handle, uint32_t x, uint32_t y, uint32_t z);
 OpalResult OPAL_C_CALL opal_command_buffer_dispatch_rays( OpalCommandBuffer *handle, uint32_t width, uint32_t height, uint32_t depth);
@@ -102,6 +104,7 @@ Creation data is optional. Update/readback memory must contain sufficient bytes 
 ```c
 OpalResult OPAL_C_CALL opal_texture_destroy(OpalTexture *handle);
 OpalResult OPAL_C_CALL opal_texture_create( OpalTextureType type, OpalTextureFormat format, int32_t width, int32_t height, OpalTextureDataFormat data_format, const void *data, uint32_t mip_levels, OpalTexture **out);
+OpalResult OPAL_C_CALL opal_texture_create_2d_batch(const OpalTextureUpload2D *uploads, size_t count, OpalTexture **out);
 OpalResult OPAL_C_CALL opal_texture_create_multisampled( OpalTextureFormat format, int32_t width, int32_t height, int32_t samples, OpalTexture **out);
 OpalResult OPAL_C_CALL opal_texture_create_depth_cubemap( OpalTextureFormat format, int32_t resolution, OpalTexture **out);
 OpalResult OPAL_C_CALL opal_texture_create_3d( OpalTextureFormat format, int32_t width, int32_t height, int32_t depth, OpalTextureDataFormat data_format, const void *data, OpalTexture **out);
