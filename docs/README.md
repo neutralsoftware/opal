@@ -10,5 +10,6 @@ Start here:
 4. [Rendering recipes](recipes.md): textures, offscreen passes, multisampling, diagnostics, and ray tracing.
 5. [Backend notes](backends.md): shader languages, feature limits, and troubleshooting.
 6. [C ABI manual](c-abi.md): C integration, ownership, errors, examples, and the [C function reference](c-abi-reference.md).
+7. [Install the SDK](installing.md) for `find_package(Opal)` or package it for distribution.
 
 The [public header](../include/opal/opal.h) defines exact C++ signatures and default arguments. Internal headers under `src/` are implementation details. Bundled dependencies have their own APIs and documentation.

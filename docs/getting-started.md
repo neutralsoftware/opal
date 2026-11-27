@@ -14,6 +14,8 @@ Opal reuses existing GLM and SDL3 CMake targets when present. Otherwise configur
 
 ## Add the library
 
+If you have installed the [Opal SDK](installing.md), use `find_package(Opal CONFIG REQUIRED)` and link your target against `Opal::Opal`.
+
 From your application's repository:
 
 ```sh
@@ -51,7 +53,7 @@ add_executable(my_app main.cpp)
 target_link_libraries(my_app PRIVATE Opal::Opal)
 ```
 
-Pin `GIT_TAG` to a reviewed commit for reproducible integrations. The repository currently provides an in-tree CMake target; it does not provide an installed package configuration for `find_package(Opal)`.
+Pin `GIT_TAG` to a reviewed commit for reproducible integrations.
 
 ## First frame
 

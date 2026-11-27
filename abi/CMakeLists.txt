@@ -4,7 +4,7 @@ add_library(Opal::C ALIAS opal_c)
 target_link_libraries(opal_c PRIVATE Opal::Opal)
 target_include_directories(opal_c PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 target_compile_definitions(opal_c PRIVATE OPAL_C_BUILD)
 target_compile_features(opal_c PRIVATE cxx_std_20)
@@ -13,12 +13,13 @@ set_target_properties(opal_c PROPERTIES
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN YES
     OUTPUT_NAME opal_c
+    EXPORT_NAME C
     VERSION ${PROJECT_VERSION}
     SOVERSION 1
 )
 
 include(GNUInstallDirs)
-install(TARGETS opal_c
+install(TARGETS opal_c EXPORT OpalTargets
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}

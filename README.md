@@ -10,6 +10,15 @@ The [C ABI manual](docs/c-abi.md) covers the optional `Opal::C` shared library, 
 
 ## Add Opal to a CMake project
 
+### Installed SDK
+
+On Windows, run `./Install-Opal.ps1` in PowerShell to build and install the x64 Vulkan SDK for your user account. The script sets `Opal_ROOT` so CMake can discover Opal in future projects. See the [SDK guide](docs/installing.md) for prerequisites, OpenGL and Metal, and prebuilt archives.
+
+```cmake
+find_package(Opal CONFIG REQUIRED)
+target_link_libraries(your_target PRIVATE Opal::Opal)
+```
+
 ### Git submodule
 
 ```bash

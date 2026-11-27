@@ -29,7 +29,7 @@ cmake --build build --target opal_c opal_c_clear
 cmake --install build --prefix ./install
 ```
 
-These commands are instructions for the consumer; this change was not built or run during implementation. `opal_c` is a shared library: distribute its DLL and import library on Windows, dylib on macOS, or shared object on Linux, plus any shared dependencies in your configuration. Install rules include the C header and both manual files. There is no installed CMake package configuration; the `Opal::C` alias is available through `add_subdirectory`.
+`opal_c` is a shared library. Distribute its DLL and import library on Windows, dylib on macOS, or shared object on Linux, plus any shared dependencies in your configuration. Install rules include the C header and both manual files. Build the [Opal SDK](installing.md) with `-DOPAL_BUILD_C_ABI=ON` to make `Opal::C` available through `find_package(Opal CONFIG REQUIRED COMPONENTS C)`.
 
 ## ABI conventions
 

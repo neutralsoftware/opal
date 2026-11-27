@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.21)
 project(Opal VERSION 1.0.0 LANGUAGES C CXX)
 
 include(FetchContent)
+include(GNUInstallDirs)
+
+option(OPAL_INSTALL "Install the Opal CMake package and bundled dependencies" OFF)
+if(OPAL_INSTALL)
+    set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+endif()
 
 set(OPAL_BACKEND AUTO CACHE STRING "AUTO, METAL, VULKAN, or OPENGL")
 set_property(CACHE OPAL_BACKEND PROPERTY STRINGS AUTO METAL VULKAN OPENGL)
@@ -21,21 +27,32 @@ endif()
 message(STATUS "Opal backend: ${OPAL_RESOLVED_BACKEND}")
 
 if(NOT TARGET glm::glm AND NOT TARGET glm::glm-header-only AND NOT TARGET glm-header-only)
+    if(OPAL_INSTALL)
+        set(GLM_BUILD_INSTALL ON)
+        set(GLM_BUILD_LIBRARY OFF)
+        set(OPAL_INSTALL_GLM_LICENSE ON)
+    endif()
     FetchContent_Declare(glm GIT_REPOSITORY https://github.com/g-truc/glm.git GIT_TAG 1.0.1 GIT_SHALLOW TRUE)
     FetchContent_MakeAvailable(glm)
 endif()
 
 if(TARGET glm::glm-header-only)
     set(OPAL_GLM_TARGET glm::glm-header-only)
+    set(OPAL_INSTALLED_GLM_TARGET glm::glm-header-only)
 elseif(TARGET glm::glm)
     set(OPAL_GLM_TARGET glm::glm)
+    set(OPAL_INSTALLED_GLM_TARGET glm::glm)
 elseif(TARGET glm-header-only)
     set(OPAL_GLM_TARGET glm-header-only)
+    set(OPAL_INSTALLED_GLM_TARGET glm::glm-header-only)
 else()
     message(FATAL_ERROR "Opal could not resolve a GLM target")
 endif()
 
 if(NOT TARGET SDL3::SDL3-static AND NOT TARGET SDL3::SDL3 AND NOT TARGET SDL3-static)
+    if(OPAL_INSTALL)
+        set(SDL_INSTALL ON)
+    endif()
     set(SDL_SHARED OFF CACHE BOOL "" FORCE)
     set(SDL_STATIC ON CACHE BOOL "" FORCE)
     set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
@@ -46,10 +63,13 @@ endif()
 
 if(TARGET SDL3::SDL3-static)
     set(OPAL_SDL_TARGET SDL3::SDL3-static)
+    set(OPAL_INSTALLED_SDL_TARGET SDL3::SDL3-static)
 elseif(TARGET SDL3::SDL3)
     set(OPAL_SDL_TARGET SDL3::SDL3)
+    set(OPAL_INSTALLED_SDL_TARGET SDL3::SDL3)
 elseif(TARGET SDL3-static)
     set(OPAL_SDL_TARGET SDL3-static)
+    set(OPAL_INSTALLED_SDL_TARGET SDL3::SDL3-static)
 else()
     message(FATAL_ERROR "Opal could not resolve an SDL3 target")
 endif()
@@ -76,7 +96,7 @@ target_compile_definitions(opal PRIVATE OPAL_VERSION="${PROJECT_VERSION}")
 target_include_directories(opal
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/src/metal
@@ -87,8 +107,8 @@ target_include_directories(opal
 target_link_libraries(opal PUBLIC
     $<BUILD_INTERFACE:${OPAL_GLM_TARGET}>
     $<BUILD_INTERFACE:${OPAL_SDL_TARGET}>
-    $<INSTALL_INTERFACE:glm::glm>
-    $<INSTALL_INTERFACE:SDL3::SDL3>
+    $<INSTALL_INTERFACE:${OPAL_INSTALLED_GLM_TARGET}>
+    $<INSTALL_INTERFACE:${OPAL_INSTALLED_SDL_TARGET}>
 )
 
 if(OPAL_RESOLVED_BACKEND STREQUAL "METAL")
@@ -109,58 +129,32 @@ if(OPAL_RESOLVED_BACKEND STREQUAL "METAL")
         target_compile_options(opal PRIVATE -Wno-elaborated-enum-base)
     endif()
 
-    find_library(OPAL_METAL_FRAMEWORK Metal REQUIRED)
-    find_library(OPAL_METALFX_FRAMEWORK MetalFX REQUIRED)
-    find_library(OPAL_COCOA_FRAMEWORK Cocoa REQUIRED)
-    find_library(OPAL_QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
-
-    target_link_libraries(opal PRIVATE
-        ${OPAL_METAL_FRAMEWORK}
-        ${OPAL_METALFX_FRAMEWORK}
-        ${OPAL_COCOA_FRAMEWORK}
-        ${OPAL_QUARTZCORE_FRAMEWORK}
-    )
+    include(packaging/OpalMetal.cmake)
+    if(NOT TARGET Opal::MetalFrameworks)
+        message(FATAL_ERROR "Opal requires Metal, MetalFX, Cocoa, and QuartzCore")
+    endif()
+    target_link_libraries(opal PRIVATE Opal::MetalFrameworks)
 
 elseif(OPAL_RESOLVED_BACKEND STREQUAL "VULKAN")
 
     find_package(Vulkan REQUIRED)
-    find_package(spirv_cross_core REQUIRED)
-    find_package(spirv_cross_glsl REQUIRED)
-    find_package(spirv_cross_reflect REQUIRED)
 
-    set(SLANG_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
-    set(SLANG_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(SLANG_ENABLE_SLANGD OFF CACHE BOOL "" FORCE)
-    set(SLANG_ENABLE_SLANGC OFF CACHE BOOL "" FORCE)
-    set(SLANG_ENABLE_SLANGI OFF CACHE BOOL "" FORCE)
-    set(SLANG_ENABLE_REPLAYER OFF CACHE BOOL "" FORCE)
-
-    set(SLANG_ENABLE_GFX OFF CACHE BOOL "" FORCE)
-
-    set(SLANG_ENABLE_DXIL OFF CACHE BOOL "" FORCE)
-
-    set(SLANG_ENABLE_CUDA OFF CACHE BOOL "" FORCE)
-    set(SLANG_ENABLE_OPTIX OFF CACHE BOOL "" FORCE)
-    set(SLANG_ENABLE_NVAPI OFF CACHE BOOL "" FORCE)
-    set(SLANG_ENABLE_AFTERMATH OFF CACHE BOOL "" FORCE)
-
-    set(OPAL_SLANG_LINKED_LIST
-        "${CMAKE_CURRENT_SOURCE_DIR}/third-party/slang/source/core/slang-internally-linked-list.h"
-    )
-    file(READ "${OPAL_SLANG_LINKED_LIST}" OPAL_SLANG_LINKED_LIST_CONTENT)
-    string(REPLACE
-        "using InternallyLinkedListNode = InternallyLinkedList<T>::Node;"
-        "using InternallyLinkedListNode = typename InternallyLinkedList<T>::Node;"
-        OPAL_SLANG_LINKED_LIST_CONTENT
-        "${OPAL_SLANG_LINKED_LIST_CONTENT}"
-    )
-    file(WRITE "${OPAL_SLANG_LINKED_LIST}" "${OPAL_SLANG_LINKED_LIST_CONTENT}")
-
-    add_subdirectory(third-party/slang)
-
-    target_link_libraries(opal PRIVATE
-        slang
-    )
+    if(OPAL_INSTALL)
+        include(packaging/OpalVulkan.cmake)
+        if(NOT TARGET spirv-cross-core)
+            find_package(spirv_cross_core CONFIG REQUIRED)
+        endif()
+        if(NOT TARGET Opal::Slang)
+            message(FATAL_ERROR "Opal SDK builds require Slang. Set VULKAN_SDK or pass OpalSlang_ROOT to CMake.")
+        endif()
+        target_link_libraries(opal PRIVATE Opal::Slang)
+    else()
+        find_package(spirv_cross_core REQUIRED)
+        find_package(spirv_cross_glsl REQUIRED)
+        find_package(spirv_cross_reflect REQUIRED)
+        include(packaging/BuildSlang.cmake)
+        target_link_libraries(opal PRIVATE slang spirv-cross-glsl spirv-cross-reflect)
+    endif()
 
     file(GLOB_RECURSE OPAL_VULKAN_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan/*.cpp   )
     target_sources(opal PRIVATE
@@ -175,8 +169,6 @@ elseif(OPAL_RESOLVED_BACKEND STREQUAL "VULKAN")
     target_link_libraries(opal PRIVATE
         Vulkan::Vulkan
         spirv-cross-core
-        spirv-cross-glsl
-        spirv-cross-reflect
     )
 
 elseif(OPAL_RESOLVED_BACKEND STREQUAL "OPENGL")
@@ -190,7 +182,7 @@ elseif(OPAL_RESOLVED_BACKEND STREQUAL "OPENGL")
     target_compile_definitions(opal PUBLIC OPENGL)
 
     target_include_directories(opal INTERFACE
-        ${CMAKE_CURRENT_SOURCE_DIR}/third-party
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third-party>
     )
 
     target_link_libraries(opal PRIVATE OpenGL::GL)
@@ -203,4 +195,8 @@ option(OPAL_BUILD_C_ABI "Build the C ABI for Opal" OFF)
 
 if(OPAL_BUILD_C_ABI)
     add_subdirectory(abi)
+endif()
+
+if(OPAL_INSTALL)
+    include(packaging/InstallOpal.cmake)
 endif()
